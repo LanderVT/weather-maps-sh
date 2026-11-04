@@ -1,4 +1,5 @@
-name: Update SnowHybrid maps (hourly)
+
+name: Update SnowHybrid + ECMWF maps (hourly)
 
 on:
   schedule:
@@ -7,17 +8,10 @@ on:
   workflow_dispatch:
     inputs:
       check_only:
-        description: 'Only check Python dependencies (no downloads or website update)'
+        description: 'Only check scripts and dependencies (no downloads or website update)'
         required: false
         type: boolean
         default: false
-
-  push:
-    branches: [main]
-    paths:
-      - '*.py'
-      - 'requirements.txt'
-      - '.github/workflows/update.yml'
 
 permissions:
   contents: read
@@ -25,7 +19,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: snowhybrid-pages-v2
+  group: snowhybrid-ecmwf-pages-v3
   cancel-in-progress: false
 
 jobs:
@@ -38,10 +32,19 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
 
     env:
+      # Hybrid Model: 6 modellen, 48 uur
       HYBRID_GRID_STEP: '0.008'
       HYBRID_DPI: '200'
       HYBRID_MIN_MODELS: '2'
       HYBRID_ESRI_RELIEF: '1'
+
+      # ECMWF Model: afzonderlijke 7-daagse verwachting
+      ECMWF_AREAS: 'alps'
+      ECMWF_N_DAYS: '7'
+      ECMWF_GRID_STEP_ALPS: '0.008'
+      ECMWF_GRID_STEP_FULL: '0.016'
+      ECMWF_DPI: '200'
+      ECMWF_ESRI_RELIEF: '1'
 
     steps:
       - name: Checkout
@@ -62,30 +65,30 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      - name: Check all seven scripts and libraries
+      - name: Check eight scripts and libraries
         run: python run_forecast.py --check
 
-      - name: Generate fresh maps and website
-        if: github.event_name != 'push' && inputs.check_only != true
+      - name: Generate Hybrid + standalone ECMWF maps and website
+        if: inputs.check_only != true
         run: python run_forecast.py
 
       - name: Configure Pages
-        if: github.event_name != 'push' && inputs.check_only != true
+        if: inputs.check_only != true
         uses: actions/configure-pages@v5
 
-      - name: Upload only current maps
-        if: github.event_name != 'push' && inputs.check_only != true
+      - name: Upload current website
+        if: inputs.check_only != true
         uses: actions/upload-pages-artifact@v4
         with:
           path: site
 
       - name: Publish website
-        if: github.event_name != 'push' && inputs.check_only != true
+        if: inputs.check_only != true
         id: deploy
         uses: actions/deploy-pages@v4
 
-      - name: Fail workflow if no new forecast was produced
-        if: github.event_name != 'push' && inputs.check_only != true
+      - name: Check both forecasts completed
+        if: inputs.check_only != true
         run: |
           python - <<'PY'
           import json
@@ -93,12 +96,13 @@ jobs:
 
           p = Path('site/status.json')
 
-          if not p.is_file() or json.loads(
-              p.read_text(encoding='utf-8')
-          ).get('status') != 'ok':
-              raise SystemExit(
-                  'Failed forecast: see logs.'
-              )
+          if not p.is_file():
+              raise SystemExit('No website status file')
 
-          print('Success: latest forecast was published.')
+          status = json.loads(p.read_text(encoding='utf-8'))
+
+          if status.get('status') != 'ok':
+              raise SystemExit('One or both forecasts failed; see logs')
+
+          print('Hybrid and ECMWF forecasts published successfully')
           PY
