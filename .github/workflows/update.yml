@@ -3,6 +3,7 @@ name: Update SnowHybrid maps (hourly)
 on:
   schedule:
     - cron: '17 * * * *'
+
   workflow_dispatch:
     inputs:
       check_only:
@@ -10,6 +11,7 @@ on:
         required: false
         type: boolean
         default: false
+
   push:
     branches: [main]
     paths:
@@ -23,21 +25,23 @@ permissions:
   id-token: write
 
 concurrency:
-  group: snowhybrid-pages
+  group: snowhybrid-pages-v2
   cancel-in-progress: false
 
 jobs:
   forecast:
     runs-on: ubuntu-24.04
     timeout-minutes: 55
+
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
+
     env:
-      HYBRID_GRID_STEP: '0.008'   # FIRST TEST: about 600-900m; use 0.004 for original ~400m
-      HYBRID_DPI: '200'           # FIRST TEST: use 400 for original resolution
-      HYBRID_MIN_MODELS: '2'      # Require >=2 working models per time block
-      HYBRID_ESRI_RELIEF: '1'     # Set 0 if Esri tile downloads fail
+      HYBRID_GRID_STEP: '0.008'
+      HYBRID_DPI: '200'
+      HYBRID_MIN_MODELS: '2'
+      HYBRID_ESRI_RELIEF: '1'
 
     steps:
       - name: Checkout
@@ -86,8 +90,15 @@ jobs:
           python - <<'PY'
           import json
           from pathlib import Path
+
           p = Path('site/status.json')
-          if not p.is_file() or json.loads(p.read_text(encoding='utf-8')).get('status') != 'ok':
-              raise SystemExit('Failed forecast: the published page contains no old maps; see logs.')
+
+          if not p.is_file() or json.loads(
+              p.read_text(encoding='utf-8')
+          ).get('status') != 'ok':
+              raise SystemExit(
+                  'Failed forecast: see logs.'
+              )
+
           print('Success: latest forecast was published.')
           PY
