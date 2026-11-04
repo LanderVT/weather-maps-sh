@@ -1,61 +1,73 @@
-# SnowHybrid: automatisch elk uur sneeuwkaarten via GitHub Actions
+# SnowHybrid + ECMWF — twee modeltabs op GitHub Pages
 
 Website: https://landervt.github.io/weather-maps-sh/
-Repository: https://github.com/LanderVT/weather-maps-sh
 
-## Inhoud
+Met deze versie draait de bestaande `SnowHybrid.py` voor 48 uur **EN** `SnowDays_ECMWF.py` afzonderlijk voor 7 dagen. De website krijgt twee tabbladen: **Hybrid Model** en **ECMWF Model**.
 
-- `SnowHybrid.py`: de hybride sneeuwberekening (zes modellen, tot +48 uur)
-- `SnowDays_AROME.py`, `SnowDays_AROME-AT.py`, `SnowDays_ICON-CH1.py`, `SnowDays_ICON-CH2.py`, `SnowDays_ICON-D2.py`, `SnowDays_ECMWF.py`: de originele zes model-downloaders, inhoudelijk ongewijzigd
-- `run_forecast.py`: tijdelijke werkmap, logofallback, nieuwe kaarten, website en opruimen
-- `requirements.txt`: de benodigde Python-pakketten
-- `.github/workflows/update.yml`: workflow voor de automatische uitvoering
-- `.gitignore`: voorkomt dat data of kaarten ooit onbedoeld gecommit worden
+## Drie wijzigingen in je bestaande repository
 
-## GitHub-installatie (via de website)
+De originele zeven wetenschappelijke scripts blijven ongemoeid. Je hoeft **slechts drie bestanden** toe te voegen/vervangen:
 
-1. Download deze ZIP en pak ze op je Mac uit. **Upload de ZIP niet letterlijk naar GitHub**: GitHub voert de bestanden in de ZIP niet automatisch uit.
-2. Open de repository `LanderVT/weather-maps-sh` en ga naar **Code > Add file > Upload files**.
-3. Upload de **acht Python-bestanden** (`SnowHybrid.py`, de zes `SnowDays_*.py` en `run_forecast.py`) plus `requirements.txt` en eventueel `README.md` naar de **hoofdfolder** (`main`). Gebruik de exacte originele namen, zonder `(2)`.
-4. Open in GitHub het bestaande `.github/workflows/update.yml` en klik op het potloodje. Vervang de hele inhoud door de inhoud van `.github/workflows/update.yml` uit deze ZIP. Commit naar `main`.
-5. Ga naar **Settings > Pages** en controleer dat **Source = GitHub Actions** staat (bij jou was dit al ingesteld).
-6. Ga naar **Actions > Update SnowHybrid maps (hourly) > Run workflow**. Vink eerst **check_only** aan voor een snelle test van imports en libraries. Deze test downloadt niets en verandert de website niet.
-7. Start vervolgens **Run workflow** opnieuw zonder `check_only`: dan worden de echte weerdata opgehaald en kaarten gemaakt en gepubliceerd.
-8. Kijk naar https://landervt.github.io/weather-maps-sh/ en bij problemen naar de rode stap onder **Actions > forecast**.
+1. **Vervang** `run_forecast.py` in de hoofdmap met de versie uit dit pakket. Deze bouwt de website met twee tabs en verwijdert oudere kaarten.
+2. **Voeg toe** `run_ecmwf.py` in de hoofdmap. Dit is de aparte runner voor de originele `SnowDays_ECMWF.py`.
+3. **Vervang** `.github/workflows/update.yml` door de nieuwe YAML uit dit pakket. Let op: de `.github`-map is op Mac verborgen (Cmd + Shift + punt).
 
-Een ander eenvoudig alternatief is GitHub Desktop: clone de repository, kopieer de **inhoud** van de uitgepakte ZIP naar de lokale repositorymap (ook `.github`, op Mac zichtbaar met `Cmd + Shift + .`), en kies **Commit to main** en **Push origin**. Daarna dezelfde Actions-tests.
+Via GitHub.com: ga naar **Code**, open `run_forecast.py`, klik op het potloodje en vervang de volledige inhoud. Voor `run_ecmwf.py` kies **Add file > Upload files**. Open daarna via **Code > .github > workflows > update.yml** en vervang de inhoud met het potloodje. Sla wijzigingen telkens op met **Commit changes**.
 
-**Let op:** upload het optionele eigen `logo-sneeuwhoogte.png` naar de repository-root als je het originele logo op elke kaart wilt. Zonder dit bestand wordt een duidelijk neutraal `HYBRID`-label gegenereerd.
+Je kunt ook GitHub Desktop gebruiken: clone de repository, kopieer alle bestanden uit het ZIP-pakket (inclusief verborgen `.github`) over de bestaande bestanden, klik **Commit to main** en daarna **Push origin**.
 
-De oude testbestanden `generate.py` en de oude README mogen blijven, maar `generate.py` wordt door deze nieuwe workflow niet meer gebruikt. Je kunt het later verwijderen.
+**Let op:** de nieuwe workflow heeft bewust geen `push`-trigger meer. Elke kleine codewijziging hoeft geen weermodeldownload te starten. De website blijft wel ieder uur ingepland en je kunt altijd handmatig starten.
 
-## Kaarten en modeldata automatisch verversen
+## De eerste echte test
 
-- Elke forecast start in een lege `_run/`-werkmap. Data worden opnieuw bij de officiële modelbronnen opgehaald.
-- De modellen houden downloads, DEM-tegels en Esri-relieftegels uitsluitend in een **tijdelijke** werkmap onder `_run/`.
-- `SnowHybrid.py` maakt de kaarten in `_run/maps/`, en slaat de modelrun-tijden op in `forecast_metadata.json`.
-- `run_forecast.py` publiceert **uitsluitend de nieuwe PNG's** en de huidige informatie in `site/`.
-- Na de berekening wordt de tijdelijke werkmap met data en oorspronkelijke kaartbestanden verwijderd; alleen de actuele website-artefacten bestaan tijdens de publicatie. Een nieuwe publicatie vervangt de gehele vorige website, inclusief oude PNG's.
-- Wanneer de berekening mislukt, wordt een foutpagina **zonder oude kaarten** gepubliceerd en krijgt de workflow uiteindelijk een rood kruisje. Als GitHub Pages zelf of een eerdere installatiestap niet werkt, kan de oude website nog tijdelijk online blijven; de ingebouwde actualiteitscontrole verbergt kaarten zodra ze meer dan zes uur oud zijn.
-- De runner is na elke job weg; datasets of kaarten worden dus niet bewaard in de repository.
+1. Open **Actions > Update SnowHybrid + ECMWF maps (hourly)**.
+2. Klik op **Run workflow** en vink eerst `check_only` aan. Een groene check betekent dat alle scripts en imports beschikbaar zijn; er worden geen voorspellingen gemaakt.
+3. Start nog een run met `check_only` **uitgevinkt**.
+4. Onder **Generate Hybrid + standalone ECMWF maps and website** zie je eerst Hybrid, daarna ECMWF. Bij succes worden beide sets gepubliceerd.
+5. Bekijk https://landervt.github.io/weather-maps-sh/ en klik bovenaan **Hybrid Model** of **ECMWF Model**. De tabkeuze kan ook via URL-fragment `#ecmwf` of `#hybrid`.
 
-## Instellingen
+## Kaarten en schijfruimte
 
-Open `.github/workflows/update.yml` en verander indien nodig:
+- **Hybrid Model**: originele 6-models berekening tot +48 uur; dagkaarten, cumulatieve sneeuw, sneeuw op de grond, sneeuwkans en modelonenigheid.
+- **ECMWF Model**: de **afzonderlijke** 7-daagse berekening via `SnowDays_ECMWF.py`, niet het ECMWF-aandeel in Hybrid. Voor de Alpen maakt het originele script 7 dagkaarten, 6 cumulatieve kaarten en 7 kaarten met nieuwe sneeuw op de grond: **20 PNG's**.
+- Modeldata, DEM, kaarttegels en tijdelijke arrays worden tijdens een run opgeslagen onder `_run/` op de GitHub-server. Na afloop verwijdert `run_forecast.py` alle tijdelijke bestanden.
+- De website bevat enkel nieuwe PNG's onder `site/maps/hybrid/` en `site/maps/ecmwf/`. De site wordt iedere publicatie volledig opnieuw opgebouwd. Oude kaarten blijven dus niet staan.
+- Als een model faalt, toont dat tabblad een foutmelding en geen oude kaarten. Een geslaagde andere modelrun blijft wel zichtbaar. De workflow wordt rood om het probleem kenbaar te maken als een van de twee modellen mislukt.
+- Zonder nieuwe publicatie worden kaarten na zes uur op de site automatisch verborgen als verouderd.
 
-| Variabele | Eerste test | Origineel | Opmerking |
-| --- | --- | --- | --- |
-| `HYBRID_GRID_STEP` | `0.008` | `0.004` | 0.008 = grovere doelgrid om GitHub niet te overbelasten; 0.004 = originele ~300–450 m grid |
-| `HYBRID_DPI` | `200` | `400` | Lager = kleinere PNG's en minder rekentijd |
-| `HYBRID_MIN_MODELS` | `2` | `2` | Minimaal twee beschikbare modellen per 6-uursblok |
-| `HYBRID_ESRI_RELIEF` | `1` | `1` | Zet op `0` als Esri-tegels niet downloaden; de kaarten krijgen dan een vlakke ondergrond |
+## Instellingen in `.github/workflows/update.yml`
 
-**Belangrijk:** de eerste test behoudt alle zes modellen, alle rekenstappen en alle soorten kaarten, maar gebruikt een iets grovere outputgrid en lagere beeldresolutie. Zodra de eerste echte uitvoering geslaagd is, kun je beide op de oorspronkelijke waarden zetten.
+| Variabele | In deze versie | Betekenis |
+| --- | --- | --- |
+| `HYBRID_GRID_STEP` | `0.008` | Hybrid, lagere resolutie voor een stabiele cloud-run; originele waarde `0.004` |
+| `HYBRID_DPI` | `200` | Hybrid-figuren; origineel `400` |
+| `ECMWF_AREAS` | `alps` | Veilige eerste test; `alps,full` maakt ook West-Europakaarten (aanzienlijk zwaarder) |
+| `ECMWF_N_DAYS` | `7` | Originele ECMWF-voorspelling van 7 dagen |
+| `ECMWF_GRID_STEP_ALPS` | `0.008` | ECMWF-doelrooster Alpen |
+| `ECMWF_GRID_STEP_FULL` | `0.016` | Grover rooster voor eventueel West-Europa |
+| `ECMWF_DPI` | `200` | ECMWF-kaarten |
+| `ECMWF_ESRI_RELIEF` | `1` | Reliëf aan; bij tegelproblemen tijdelijk `0` |
 
-## Rekentijd en beperkingen
+**West-Europa ook publiceren?** Wijzig na een geslaagde test `ECMWF_AREAS: 'alps'` naar `ECMWF_AREAS: 'alps,full'`. Dat verdubbelt het aantal ECMWF-kaarten (20 + 20 = 40) en verhoogt downloads, geheugen en rekentijd. Een volle 400m-`full`-kaart is voor GitHub Actions mogelijk te zwaar, daarom heeft `ECMWF_GRID_STEP_FULL` een eigen grovere instelling.
 
-De oorspronkelijke scripts gebruiken veel geheugen, GRIB-data en Cartopy-achtergrondbeelden. Een publieke repository gebruikt de standaard GitHub Actions Ubuntu-runner met doorgaans 4 cores, 16 GB RAM en 14 GB opslag. De workflow stopt na 55 minuten als hij te lang duurt. Bij de eerste echte uitvoering kunnen API-wijzigingen, downloadlimieten of ontbrekende externe kaarttegels zichtbaar worden; dat kan alleen met een live GitHub-run worden getest.
+## Automatische planning
 
-De planning `17 * * * *` vraagt een update ieder uur rond minuut 17 UTC. GitHub garandeert de exacte start niet. Als de volledige run te zwaar is, probeer een grovere grid, minder DPI, minder runs per dag, of een cloudserver.
+De workflow gebruikt `cron: '07 * * * *'`: GitHub probeert elk uur rond minuut 07 UTC een run te starten. Er is geen garantie dat die precies op tijd begint, en geplande runs kunnen vertragen of worden overgeslagen. Je kunt een handmatige run starten via **Run workflow**. De concurrency-groep heeft een nieuwe naam (`snowhybrid-ecmwf-pages-v3`) zodat eerder vastgelopen runs uit oudere workflowversies geen blokkade vormen.
 
-Publiceer geen wachtwoorden, API-sleutels of andere privégegevens in deze publieke repository. Voor eventuele API-credentials gebruikt GitHub **Settings > Secrets and variables > Actions**.
+De workflow heeft een limiet van 55 minuten per uitvoering. Indien ECMWF met 7 dagen te zwaar blijkt, probeer dan `ECMWF_N_DAYS: '3'`, verlaag de DPI, zet reliëf uit of gebruik een krachtigere runner.
+
+## Oorspronkelijke modelcode
+
+Dit pakket bevat de zeven originele modelbestanden, identiek aan de eerder werkende GitHub-versie:
+
+- `SnowHybrid.py`
+- `SnowDays_AROME.py`
+- `SnowDays_AROME-AT.py`
+- `SnowDays_ICON-CH1.py`
+- `SnowDays_ICON-CH2.py`
+- `SnowDays_ICON-D2.py`
+- `SnowDays_ECMWF.py`
+
+Zij worden niet aangepast: de aparte ECMWF-runner importeert het oorspronkelijke script, configureert de uitvoermap en cloudresolutie, en roept `main()` aan. Een bestaand eigen `logo-sneeuwhoogte.png` in de repository blijft worden gebruikt; anders verschijnt tijdelijk een neutraal logo op beide kaarttypes.
+
+**Teststatus:** Python-syntax, websitevervanging, tabs, ontbrekende-modelafhandeling en de ECMWF-runner met een gesimuleerde modelbron zijn lokaal getest. Een echte downloadsessie voor ECMWF en de GitHub-runnerbelasting kan pas via de eerste echte Actions-run worden gecontroleerd.
