@@ -127,7 +127,9 @@ WEIGHTS = {
 
 HYBRID_HOURS = 48
 
-HYBRID_STEP = 6          # uur; ECMWF levert 6-uurlijks
+HYBRID_STEP = 3          # uur; sommige modellen (ECMWF) leveren 6-uurlijks
+# De 6-uursvelden worden in ModelStream.interval() naar overlappende
+# 3-uursblokken verdeeld op basis van hun tijdsduur.
 
 AREA = "alps"
 
@@ -197,129 +199,99 @@ def embed(field, xf_model, yf_model, xf, yf, fill):
     return out
 
 class ModelStream:
+    """Voeg modeltijdstappen (3u of 6u) samen tot 3-uurs Hybrid-blokken.
 
-    """Levert per Hybrid-blok de opgetelde velden van een model (of None)."""
+    Voor native 6-uursvelden wordt de totale neerslag en sneeuw binnen
+    het overlappende deel van het tijdvak naar rato van de duur verdeeld.
+    Temperatuur is een tijdgewogen gemiddelde. Dit behoudt totale neerslag
+    maar veronderstelt bij ECMWF uniforme verdeling binnen zijn 6u-vak.
+    """
 
     def __init__(self, name, module, session, run, t0, t_end, xf, yf):
-
         self.name = name
-
         self.run = run
-
         self.xf, self.yf = xf, yf
-
         self.pending = None
 
         step = module.STEP_HOURS
-
         max_lead = getattr(module, "MAX_LEAD", 10 ** 6)
 
+        # Negeer de eerste overlappende native stap niet bij een
+        # 3-uurs start die midden in een 6-uurs tijdvak ligt.
         start = max(0, int((t0 - run).total_seconds() // 3600))
+        start -= start % step
 
-        start += -start % step
-
+        # Ook het laatste tijdvak moet tot t_end reiken; anders valt de
+        # laatste halve ECMWF-stap weg wanneer t_end tussen twee 6u-tijden ligt.
         end = min(int((t_end - run).total_seconds() // 3600), max_lead)
-
-        end -= end % step
+        end += -end % step
+        end = min(end, max_lead)
 
         self.gen = (
-
-            module.iterate_steps(
-
-                session, run, list(range(start, end + 1, step)), AREA
-
-            )
-
+            module.iterate_steps(session, run, list(range(start, end + 1, step)), AREA)
             if end > start else iter(())
-
         )
 
     def interval(self, t_start, t_stop):
-
         acc = None
-
         covered = 0.0
 
         while True:
-
             try:
-
-                item = self.pending or next(self.gen, None)
-
+                item = self.pending if self.pending is not None else next(self.gen, None)
             except Exception as exc:
-
-                # Een haperend model mag Hybrid niet stoppen.
-
                 print(f"WAARSCHUWING: {self.name} valt weg ({exc})")
-
                 self.gen = iter(())
-
                 item = None
-
             self.pending = None
 
             if item is None:
-
                 break
 
             s = self.run + timedelta(hours=item["a"])
-
             e = self.run + timedelta(hours=item["b"])
-
             if e <= t_start:
-
                 continue
-
             if s >= t_stop:
-
                 self.pending = item
-
                 break
 
+            overlap_start = max(s, t_start)
+            overlap_end = min(e, t_stop)
+            hours = (overlap_end - overlap_start).total_seconds() / 3600
+            source_hours = (e - s).total_seconds() / 3600
+            if hours <= 0 or source_hours <= 0:
+                continue
+
             fields = {
-
-                k: embed(item[k], item["xf"], item["yf"],
-
-                         self.xf, self.yf, 0.0)
-
+                k: embed(item[k], item["xf"], item["yf"], self.xf, self.yf, 0.0)
                 for k in ("snow_mm", "rain_mm", "snow_cm", "temp")
-
             }
-
-            hours = (e - s).total_seconds() / 3600
-
+            valid = embed(item["land"], item["xf"], item["yf"],
+                          self.xf, self.yf, False)
             if acc is None:
-
                 acc = {k: np.zeros_like(v) for k, v in fields.items()}
+                acc["valid"] = valid.copy()
+            else:
+                acc["valid"] &= valid
 
-                acc["valid"] = embed(
-
-                    item["land"], item["xf"], item["yf"],
-
-                    self.xf, self.yf, False
-
-                )
-
+            fraction = hours / source_hours
             for k in ("snow_mm", "rain_mm", "snow_cm"):
-
-                acc[k] += fields[k]
-
+                acc[k] += fields[k] * fraction
             acc["temp"] += fields["temp"] * hours
-
             covered += hours
 
             if e >= t_stop:
-
+                # Bewaar de ongebruikte rest van een native 6-uursveld
+                # voor het volgende Hybrid-blok van 3 uur.
+                if e > t_stop:
+                    self.pending = item
                 break
 
-        block = (t_stop - t_start).total_seconds() / 3600
-
-        if acc is None or not np.isclose(covered, block):
-
+        block_hours = (t_stop - t_start).total_seconds() / 3600
+        if acc is None or not np.isclose(covered, block_hours):
             return None
-
         acc["temp"] /= covered
-
         return acc
 
 # ============================================================
