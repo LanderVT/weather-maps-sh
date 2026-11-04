@@ -30,8 +30,8 @@ def main() -> None:
 
     # Only the *standalone* ECMWF panel ignores the 12-hour freshness limit.
     # The Hybrid process loads its own copy of SnowDays_ECMWF.py and keeps
-    # MAX_RUN_AGE_H = 12, exactly as before.
-    mod.MAX_RUN_AGE_H = float("inf")
+    # MAX_RUN_AGE_H = 24
+    mod.MAX_RUN_AGE_H = 24
     print("Standalone ECMWF: no 12-hour model-age cutoff; using latest complete available run", flush=True)
 
     areas = tuple(
