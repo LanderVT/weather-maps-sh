@@ -38,21 +38,9 @@ Werkwijze (per blok van HYBRID_STEP uur):
 
    met de gewogen gemiddelde temperatuur.
 
-5. Onzekerheid uit de modellen samen (een 'poor man's ensemble'):
+Kaarten (map outputmaps/HYBRID): sneeuwval per dag, cumulatief,
 
-   - kans op >= PROB_THRESHOLDS_CM cumulatieve sneeuw (vanaf nu tot het
-
-     einde van elke cumulatieve periode): gewogen aandeel van de modellen
-
-     dat die hoeveelheid haalt;
-
-   - modelonenigheid: gewogen standaardafwijking / gemiddelde van de
-
-     dagsneeuw, alleen waar gemiddeld >= SPREAD_MIN_CM valt.
-
-Kaarten (map outputmaps/HYBRID): sneeuwval per dag, cumulatief, nieuwe
-
-sneeuw op de grond, kans per drempel (cumulatief) en modelonenigheid per dag.
+nieuwe sneeuw op de grond.
 
 Python-pakketten: zie de SnowDays_*.py-scripts.
 
@@ -69,7 +57,6 @@ from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
-from matplotlib.colors import BoundaryNorm, ListedColormap
 
 import numpy as np
 
@@ -136,20 +123,6 @@ AREA = "alps"
 USE_PM_MEAN = True
 
 PM_SAMPLE = 5           # elke n-de pixel voor de verdeling (sneller)
-
-# Kanskaarten (cumulatief) en modelonenigheid (per dag).
-
-PROB_THRESHOLDS_CM = (5, 20)
-
-PROB_LEVELS = [10, 30, 50, 70, 90, 100]
-
-PROB_COLORS = ["#c6dbef", "#6baed6", "#2171b5", "#6a51a3", "#3f007d"]
-
-SPREAD_MIN_CM = 2.0
-
-SPREAD_LEVELS = [0, 0.25, 0.5, 1.0, 10]
-
-SPREAD_COLORS = ["#4daf4a", "#ffd92f", "#fd8d3c", "#e31a1c"]
 
 LABEL = "Hybride sneeuwverwachting"
 
@@ -396,40 +369,6 @@ def hybrid_block(parts, weights_now, shape):
 
     }
 
-def plot_field(lib, data, xf, yf, extent, levels, colors, title, label, name):
-
-    """Kaart met een eigen kleurenschaal (kans, onenigheid)."""
-
-    fig, ax, proj = lib.common_axes(extent)
-
-    cmap = ListedColormap(colors)
-
-    cmap.set_bad((0, 0, 0, 0))
-
-    cf = ax.contourf(
-
-        xf, yf, np.ma.masked_invalid(data),
-
-        levels=levels,
-
-        cmap=cmap,
-
-        norm=BoundaryNorm(levels, cmap.N),
-
-        transform=proj,
-
-        alpha=0.85,
-
-        zorder=3
-
-    )
-
-    lib.finish_map(
-
-        fig, ax, cf, title, label, levels, OUTPUT_DIR / name, extent, AREA
-
-    )
-
 def day_windows(t0, t_end):
 
     """(start, eind) in uren na t0: rest van vandaag + volle UTC-dagen,
@@ -584,10 +523,6 @@ def main():
 
         day_blocks = {w: {} for w in windows}
 
-        model_day = {w: {} for w in windows}  # dagsneeuw (cm) per model
-
-        model_valid = {w: {} for w in windows}  # waar dat model data heeft
-
         covered = np.zeros(shape, dtype=bool)
 
         for k in range(windows[-1][1] // HYBRID_STEP):
@@ -645,18 +580,6 @@ def main():
                     day_samples[window][name] = [tot, weights_now[name], valid]
 
                 day_blocks[window][name] = day_blocks[window].get(name, 0) + 1
-
-                snow = acc["snow_cm"].astype(np.float32)
-
-                if name in model_day[window]:
-
-                    model_day[window][name] += snow
-
-                else:
-
-                    model_day[window][name] = snow
-
-                    model_valid[window][name] = acc["valid"]
 
         # Doorgang 2: per dag probability matching op de dagsom; elk blok
 
@@ -818,192 +741,6 @@ def main():
 
             map_errors.append(f"{kind} +{start}-{end}: {exc}")
             print(f"FOUT {kind} +{start}-{end}: {exc}")
-
-    # Modelonenigheid per dag en kans cumulatief, uit de modellen die de
-
-    # hele dag (resp. alle dagen tot dan) dekken (ruwe sneeuw per model,
-
-    # dus zonder probability matching).
-
-    n_extra = 0
-
-    # Per model: cumulatieve sneeuw, som van de daggewichten, geldigheid.
-
-    cum_snow, cum_w, cum_valid = {}, {}, {}
-
-    for k, window in enumerate(windows):
-
-        n_blocks = (window[1] - window[0]) // HYBRID_STEP
-
-        full = [
-
-            n for n in model_day[window]
-
-            if day_blocks[window][n] == n_blocks
-
-        ]
-
-        # Een model blijft alleen in de cumulatieve kans als het elke dag
-
-        # tot nu toe volledig dekt.
-
-        for n in list(cum_snow):
-
-            if n not in full:
-
-                del cum_snow[n], cum_w[n], cum_valid[n]
-
-        for n in full:
-
-            if k == 0:
-
-                cum_snow[n] = model_day[window][n].astype(float)
-
-                cum_w[n] = day_samples[window][n][1] / n_blocks
-
-                cum_valid[n] = model_valid[window][n].copy()
-
-            elif n in cum_snow:
-
-                cum_snow[n] = cum_snow[n] + model_day[window][n]
-
-                cum_w[n] += day_samples[window][n][1] / n_blocks
-
-                cum_valid[n] = cum_valid[n] & model_valid[window][n]
-
-        if k > 0 and len(cum_snow) >= 2:
-
-            Wc = {n: cum_w[n] / (k + 1) * cum_valid[n] for n in cum_snow}
-
-            wcsum = sum(Wc.values())
-
-            okc = land & (wcsum > 0)
-
-            safec = np.where(okc, wcsum, 1.0)
-
-            end_dt = (t0 + timedelta(hours=window[1])).astimezone(lib.LOCAL_TZ)
-
-            cperiod = f"{lib.fmt_date(t0.astimezone(lib.LOCAL_TZ))} – {lib.fmt_date(end_dt)}"
-
-            ctag = f"{t0:%Y%m%d_%H}z_f000-{window[1]:03d}"
-
-            cmodels_txt = f"{len(cum_snow)} modellen"
-
-            for thr in PROB_THRESHOLDS_CM:
-
-                prob = 100 * sum(
-
-                    Wc[n] * (cum_snow[n] >= thr) for n in cum_snow
-
-                ) / safec
-
-                prob = np.where(okc & (prob >= PROB_LEVELS[0]), prob, np.nan)
-
-                try:
-
-                    plot_field(
-
-                        lib, prob, xf, yf, extent, PROB_LEVELS, PROB_COLORS,
-
-                        f"Kans op ≥ {thr} cm cumulatief: {cperiod}",
-
-                        f"Kans (%) volgens {cmodels_txt}, gewogen — gedownscaled",
-
-                        f"{FILE_PREFIX}_kans_cumulatief_{thr}cm_{AREA}_{ctag}.png"
-
-                    )
-
-                    n_extra += 1
-
-                except Exception as exc:
-
-                    map_errors.append(f"kans cumulatief {thr} cm {window}: {exc}")
-                    print(f"FOUT kans cumulatief {thr} cm {window}: {exc}")
-
-        elif k > 0:
-
-            print(f"Te weinig modellen voor cumulatieve kans tot +{window[1]}")
-
-        if len(full) < 2:
-
-            print(f"Te weinig modellen voor onzekerheid {window}")
-
-            continue
-
-        W = {
-
-            n: day_samples[window][n][1] / n_blocks * model_valid[window][n]
-
-            for n in full
-
-        }
-
-        wsum = sum(W.values())
-
-        ok = land & (wsum > 0)
-
-        safe = np.where(ok, wsum, 1.0)
-
-        mean = sum(W[n] * model_day[window][n] for n in full) / safe
-
-        var = sum(
-
-            W[n] * (model_day[window][n] - mean) ** 2 for n in full
-
-        ) / safe
-
-        start_dt = (t0 + timedelta(hours=window[0])).astimezone(lib.LOCAL_TZ)
-
-        end_dt = (t0 + timedelta(hours=window[1])).astimezone(lib.LOCAL_TZ)
-
-        period = f"{lib.fmt_date(start_dt)} – {lib.fmt_date(end_dt)}"
-
-        tag = f"{t0:%Y%m%d_%H}z_f{window[0]:03d}-{window[1]:03d}"
-
-        models_txt = f"{len(full)} modellen"
-
-        spread = np.where(
-
-            ok & (mean >= SPREAD_MIN_CM),
-
-            np.sqrt(var) / np.maximum(mean, 1e-6),
-
-            np.nan
-
-        )
-
-        try:
-
-            plot_field(
-
-                lib, spread, xf, yf, extent, SPREAD_LEVELS, SPREAD_COLORS,
-
-                f"Modelonenigheid: {period}",
-
-                "Spreiding / gemiddelde dagsneeuw (< 0,25 eens, "
-
-                f"> 1 sterk oneens) — {models_txt}",
-
-                f"{FILE_PREFIX}_onenigheid_{AREA}_{tag}.png"
-
-            )
-
-            n_extra += 1
-
-        except Exception as exc:
-
-            map_errors.append(f"onenigheid {window}: {exc}")
-            print(f"FOUT onenigheid {window}: {exc}")
-
-        print(
-
-            f"{period}: {len(full)} modellen ({', '.join(full)}); "
-
-            f"mediane onenigheid {np.nanmedian(spread):.2f}"
-
-        )
-
-    count += n_extra
 
     print(f"\nKlaar: {count} kaarten. Opslag: {OUTPUT_DIR}")
 
