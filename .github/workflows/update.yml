@@ -2,7 +2,7 @@ name: Update SnowHybrid maps (hourly)
 
 on:
   schedule:
-    - cron: '17 * * * *'
+    - cron: '00 * * * *'
 
   workflow_dispatch:
     inputs:
