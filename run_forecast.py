@@ -118,21 +118,52 @@ def display_title(name: str) -> str:
             f"- {label(run + timedelta(hours=int(end)))}")
 
 
-def webcam_pin_links(source: Path) -> str:
-    """Add accurately located clickable cameras to Hybrid maps only.
+# The fallback box is calibrated for the fixed Alpine map layout rendered
+# by SnowDays_ICON-CH2.py (13.5 x 8.1 in, PlateCarree, cropped PNG).  It is
+# only used if the optional sidecar written by SnowHybrid.py is missing or
+# malformed.  Prefer precise georeferencing whenever possible.
+HYBRID_ALPS_FALLBACK_BOX = (0.7, 5.5, 98.6, 80.0)
+HYBRID_ALPS_EXTENT = (5.0, 16.8, 43.6, 49.0)
 
-    The PNG-to-geographic conversion comes from the actual Matplotlib
-    bounding box saved with each map. If missing, show a plain map.
+
+def webcam_pin_links(source: Path) -> str:
+    """Create five clickable camera markers on the Hybrid PNG.
+
+    An exact crop calibration is read from each *.png.geo.json sidecar.
+    Previous versions silently returned zero markers if the sidecar was
+    missing. Fall back to the known fixed Alpen map layout instead, while
+    logging the issue so it is diagnosable from GitHub Actions.
     """
     meta_path = Path(str(source) + '.geo.json')
-    if not meta_path.is_file():
-        return ''
-    try:
-        data = json.loads(meta_path.read_text(encoding='utf-8'))
-        left, top, width, height = map(float, data['plot_box_pct'])
-        west, east, south, north = map(float, data['extent_lonlat'])
-        if not (east > west and north > south and width > 0 and height > 0):
-            raise ValueError('Invalid geographic extent')
+    calibration = None
+    source_type = 'exact'
+
+    if meta_path.is_file():
+        try:
+            data = json.loads(meta_path.read_text(encoding='utf-8'))
+            left, top, width, height = map(float, data['plot_box_pct'])
+            west, east, south, north = map(float, data['extent_lonlat'])
+            if not (east > west and north > south and width > 0 and height > 0
+                    and 0 <= left <= 100 and 0 <= top <= 100
+                    and left + width <= 100.5 and top + height <= 100.5):
+                raise ValueError('Invalid crop calibration')
+            calibration = (left, top, width, height, west, east, south, north)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print(f'WAARSCHUWING: ongeldige webcam-georeferentie voor {source.name}: {exc}', flush=True)
+
+    if calibration is None:
+        if '_alps_' not in source.name.lower():
+            print(f'WAARSCHUWING: geen webcam-georeferentie voor {source.name}', flush=True)
+            return ''
+        left, top, width, height = HYBRID_ALPS_FALLBACK_BOX
+        west, east, south, north = HYBRID_ALPS_EXTENT
+        calibration = (left, top, width, height, west, east, south, north)
+        source_type = 'fallback'
+        print(f'Webcams: {source.name}: geen bruikbare .geo.json; '
+              'benaderde Alpenpositie gebruikt', flush=True)
+
+    def render(cal):
+        left, top, width, height, west, east, south, north = cal
         links = []
         for cam in HYBRID_WEBCAMS:
             if not (west <= cam['lon'] <= east and south <= cam['lat'] <= north):
@@ -150,10 +181,19 @@ def webcam_pin_links(source: Path) -> str:
                 f'style="left:{x:.4f}%;top:{y:.4f}%">'
                 f'<span aria-hidden="true">📷</span></a>'
             )
-        return ''.join(links)
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        print(f'Webcampositie overgeslagen voor {source.name}: {exc}', flush=True)
-        return ''
+        return links
+
+    links = render(calibration)
+    # A sidecar may be valid structurally but have the wrong geographic
+    # extent, leaving no camera visible. Recover on known Alpine maps.
+    if not links and source_type == 'exact' and '_alps_' in source.name.lower():
+        left, top, width, height = HYBRID_ALPS_FALLBACK_BOX
+        west, east, south, north = HYBRID_ALPS_EXTENT
+        links = render((left, top, width, height, west, east, south, north))
+        print(f'Webcams: {source.name}: zijbestand bevat geen camerapunten; '
+              'benaderde Alpenpositie gebruikt', flush=True)
+    print(f'Webcams {source.name}: {len(links)} symbolen', flush=True)
+    return ''.join(links)
 
 
 def collect_models(errors: dict[str, str]) -> dict[str, dict]:
@@ -395,6 +435,13 @@ if (Date.now() - updated > 6*60*60*1000) {{
 </script>
 </body></html>'''
     (SITE / "index.html").write_text(html, encoding="utf-8")
+    webcam_total = html.count('class="webcam-pin"')
+    hybrid_maps = len(results['hybrid']['images'])
+    print(f"WEB-CAM CONTROLE: {webcam_total} klikbare symbolen "
+          f"op {hybrid_maps} Hybrid-kaarten", flush=True)
+    if hybrid_maps and webcam_total == 0:
+        print('::warning::Webcams ontbreken op alle Hybrid-kaarten; '
+              'controleer de geo-metadata en run_forecast.py', flush=True)
     print(
         f"Website: {overall}; " + ", ".join(
             f"{MODEL_NAMES[m]} {len(results[m]['images'])} PNG" for m in MODELS
