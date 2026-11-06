@@ -149,6 +149,63 @@ def load_module(name, filename):
 
     return module
 
+def enable_webcam_georeferencing(lib):
+    """Save geo calibration next to Hybrid PNGs, without changing the images.
+
+    Matplotlib tight-crops figures when saving. The overlay must use the
+    *actual rendered axes position*, not an estimated rectangle, to avoid
+    placing camera links over the wrong mountain or outside the map.
+    """
+    import json
+
+    original_finish = lib.finish_map
+
+    def finish_with_georef(fig, ax, cf, title, label, levels,
+                           filepath, extent, area, *args, **kwargs):
+        result = original_finish(
+            fig, ax, cf, title, label, levels,
+            filepath, extent, area, *args, **kwargs
+        )
+        try:
+            # The figure object remains available even after plt.close(fig).
+            # savefig has already rendered this figure; avoid a second
+            # expensive Cartopy/relief redraw on the hourly GitHub runner.
+            renderer = fig.canvas.get_renderer()
+            tight = fig.get_tightbbox(renderer)  # inches
+            axes = ax.get_window_extent(renderer).transformed(
+                fig.dpi_scale_trans.inverted()
+            )
+            # Original SnowDays_ICON-CH2.py finish_map uses pad_inches=0.06.
+            pad = 0.06
+            w = float(tight.width + 2 * pad)
+            h = float(tight.height + 2 * pad)
+            box = [
+                100.0 * (axes.x0 - tight.x0 + pad) / w,
+                100.0 * (tight.y1 - axes.y1 + pad) / h,
+                100.0 * axes.width / w,
+                100.0 * axes.height / h,
+            ]
+            left, top, width, height = box
+            if not (0 <= left <= 100 and 0 <= top <= 100
+                    and 0 < width <= 100 and 0 < height <= 100
+                    and left + width <= 100.5 and top + height <= 100.5):
+                raise ValueError(f"Invalid Hybrid geo bounds: {box}")
+            xmin, xmax = ax.get_xlim()
+            ymin, ymax = ax.get_ylim()
+            metadata = {
+                "plot_box_pct": [round(z, 6) for z in box],
+                "extent_lonlat": [xmin, xmax, ymin, ymax],
+            }
+            target = Path(str(filepath) + '.geo.json')
+            target.write_text(json.dumps(metadata), encoding='utf-8')
+        except Exception as exc:
+            # A map without hotspots is much better than a failed forecast.
+            print(f"WAARSCHUWING: webcam-overlay overgeslagen ({exc})")
+        return result
+
+    lib.finish_map = finish_with_georef
+
+
 def embed(field, xf_model, yf_model, xf, yf, fill):
 
     """Plaats een modelveld (deelrooster, bv. AROME) in het Hybrid-rooster."""
@@ -431,6 +488,8 @@ def main():
     lib.FILE_PREFIX = FILE_PREFIX
 
     lib.STEP_HOURS = HYBRID_STEP
+    # Calibrate interactive camera positions without touching the PNGs.
+    enable_webcam_georeferencing(lib)
     # Optional downscaling of the entire common grid for the CI runner.
     # 0.004 is the original scientific setting; 0.008 is the economical pilot.
     # All six models MUST share the same target GRID_STEP.

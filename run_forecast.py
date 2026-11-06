@@ -33,6 +33,22 @@ MODELS = ("hybrid", "ecmwf", "icon_d2")
 MODEL_NAMES = {
     "hybrid": "Hybrid Model", "ecmwf": "ECMWF Model", "icon_d2": "ICON-D2 Model"
 }
+# Five official Alpine webcam pages. These are regular links, not live embeds,
+# so the images remain lightweight and the website requires no third-party JS.
+# To add/remove a camera later, edit only this list.
+HYBRID_WEBCAMS = (
+    {"name": "Chamonix", "lon": 6.870, "lat": 45.924,
+     "url": "https://www.chamonix.com/webcams"},
+    {"name": "Zermatt", "lon": 7.748, "lat": 46.020,
+     "url": "https://zermatt.swiss/en/info/webcams"},
+    {"name": "Engelberg / Titlis", "lon": 8.407, "lat": 46.819,
+     "url": "https://www.engelberg.ch/webcams/"},
+    {"name": "St. Anton", "lon": 10.264, "lat": 47.129,
+     "url": "https://www.stantonamarlberg.com/en/webcams"},
+    {"name": "Val Gardena", "lon": 11.719, "lat": 46.575,
+     "url": "https://www.valgardena.it/en/webcams/"},
+)
+
 GROUPS = (
     "Sneeuwval per dag", "Cumulatieve sneeuwval", "Nieuwe sneeuw op de grond",
     "Sneeuwgrens", "Vorstgrens", "Kans op sneeuw", "Modelonenigheid",
@@ -100,6 +116,44 @@ def display_title(name: str) -> str:
         return f"{region} · {label(run + timedelta(hours=int(start)))}"
     return (f"{region} · {label(run + timedelta(hours=int(start)))} "
             f"- {label(run + timedelta(hours=int(end)))}")
+
+
+def webcam_pin_links(source: Path) -> str:
+    """Add accurately located clickable cameras to Hybrid maps only.
+
+    The PNG-to-geographic conversion comes from the actual Matplotlib
+    bounding box saved with each map. If missing, show a plain map.
+    """
+    meta_path = Path(str(source) + '.geo.json')
+    if not meta_path.is_file():
+        return ''
+    try:
+        data = json.loads(meta_path.read_text(encoding='utf-8'))
+        left, top, width, height = map(float, data['plot_box_pct'])
+        west, east, south, north = map(float, data['extent_lonlat'])
+        if not (east > west and north > south and width > 0 and height > 0):
+            raise ValueError('Invalid geographic extent')
+        links = []
+        for cam in HYBRID_WEBCAMS:
+            if not (west <= cam['lon'] <= east and south <= cam['lat'] <= north):
+                continue
+            x = left + (cam['lon'] - west) / (east - west) * width
+            y = top + (north - cam['lat']) / (north - south) * height
+            if not (0 <= x <= 100 and 0 <= y <= 100):
+                continue
+            url = escape(cam['url'], quote=True)
+            name = escape(cam['name'], quote=True)
+            links.append(
+                f'<a class="webcam-pin" href="{url}" target="_blank" '
+                f'rel="noopener noreferrer" title="Webcam {name}" '
+                f'aria-label="Webcam {name} openen in nieuw tabblad" '
+                f'style="left:{x:.4f}%;top:{y:.4f}%">'
+                f'<span aria-hidden="true">📷</span></a>'
+            )
+        return ''.join(links)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(f'Webcampositie overgeslagen voor {source.name}: {exc}', flush=True)
+        return ''
 
 
 def collect_models(errors: dict[str, str]) -> dict[str, dict]:
@@ -195,10 +249,12 @@ def make_site(errors: dict[str, str] | None = None) -> str:
                 name = escape(source.name, quote=True)
                 label = escape(display_title(source.name))
                 url = f"maps/{model}/{name}"
+                cameras = webcam_pin_links(source) if model == "hybrid" else ""
                 groups[map_group(source.name)].append(
-                    f'<article class="map-card"><a href="{url}" target="_blank" rel="noopener">'
+                    f'<article class="map-card"><div class="map-frame">'
+                    f'<a class="map-image-link" href="{url}" target="_blank" rel="noopener">'
                     f'<img loading="lazy" src="{url}?v={int(now.timestamp())}" alt="{label}"></a>'
-                    f'<p>{label}</p></article>'
+                    f'{cameras}</div><p>{label}</p></article>'
                 )
         if good:
             sections = "".join(
@@ -221,9 +277,17 @@ def make_site(errors: dict[str, str] | None = None) -> str:
                 intro = (f"ICON-D2 · 48 uur · {regions} · {len(result['images'])} kaarten "
                          f"· sneeuw- en vorstgrens om de 6 uur")
             detail = f'<p class="detail">{runs}</p>' if runs else ""
+            webcam_toolbar = (
+                '<div class="webcam-toolbar">'
+                '<label><input type="checkbox" id="toggle-hybrid-webcams" checked>'
+                ' 📷 Toon 5 webcams op de Hybrid-kaarten</label>'
+                '<span>Klik op een camera voor de officiële livebeelden.</span>'
+                '</div>'
+            ) if model == "hybrid" else ""
             markup = (
                 f'<p class="panel-intro">{intro}</p>{detail}'
-                f'<div class="model-status good">Nieuwe kaarten beschikbaar</div>{sections}'
+                f'<div class="model-status good">Nieuwe kaarten beschikbaar</div>'
+                f'{webcam_toolbar}{sections}'
             )
         else:
             markup = (
@@ -267,6 +331,16 @@ h2 {{ font-size:1.2rem; margin:34px 0 15px; }}
 .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,380px),1fr)); gap:18px; }}
 .map-card {{ background:white; border-radius:10px; overflow:hidden; border:1px solid #e0e7ef; box-shadow:0 1px 4px #0000000d; }}
 .map-card img {{ display:block; width:100%; height:auto; }}
+.map-frame {{ position:relative; }}
+.map-image-link {{ display:block; }}
+.webcam-pin {{ position:absolute; z-index:3; transform:translate(-50%,-50%); width:28px; height:28px; display:flex; align-items:center; justify-content:center; text-decoration:none; background:#fffef4; border:2px solid #135e88; border-radius:50%; box-shadow:0 1px 4px #0008; font-size:15px; line-height:1; }}
+.webcam-pin:hover {{ background:#d5f0ff; transform:translate(-50%,-50%) scale(1.16); z-index:4; }}
+.webcam-pin:focus-visible {{ outline:3px solid #ffa400; outline-offset:2px; }}
+#panel-hybrid.hide-webcams .webcam-pin {{ display:none; }}
+.webcam-toolbar {{ display:flex; gap:10px 20px; align-items:center; flex-wrap:wrap; margin:18px 0 10px; background:#fff; padding:12px 15px; border:1px solid #d8e2ee; border-radius:10px; }}
+.webcam-toolbar label {{ font-weight:750; cursor:pointer; }}
+.webcam-toolbar input {{ width:17px; height:17px; vertical-align:middle; accent-color:#10396c; }}
+.webcam-toolbar span {{ color:#516278; font-size:.84rem; }}
 .map-card p {{ padding:0 14px; font-size:.83rem; color:#516278; overflow-wrap:anywhere; }}
 footer {{ max-width:1240px; margin:0 auto; color:#65758b; padding:0 18px 28px; font-size:.82rem; line-height:1.6; }}
 @media(max-width:600px) {{ .tabs .tab {{ flex:1; min-width:140px; }} }}
@@ -299,6 +373,14 @@ for (const tab of document.querySelectorAll('button[data-model]')) {{
 }}
 window.addEventListener('hashchange', () => selectModel(location.hash.slice(1)));
 selectModel(location.hash.slice(1));
+const webcamCheckbox = document.getElementById('toggle-hybrid-webcams');
+if (webcamCheckbox) {{
+  webcamCheckbox.addEventListener('change', () => {{
+    document.getElementById('panel-hybrid').classList.toggle(
+      'hide-webcams', !webcamCheckbox.checked
+    );
+  }});
+}}
 const updated = Date.parse({json.dumps(now.isoformat())});
 if (Date.now() - updated > 6*60*60*1000) {{
   for (const panel of document.querySelectorAll('.model-panel')) {{
