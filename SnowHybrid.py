@@ -167,10 +167,16 @@ def enable_webcam_georeferencing(lib):
             filepath, extent, area, *args, **kwargs
         )
         try:
-            # The figure object remains available even after plt.close(fig).
-            # savefig has already rendered this figure; avoid a second
-            # expensive Cartopy/relief redraw on the hourly GitHub runner.
-            renderer = fig.canvas.get_renderer()
+            # After savefig/plt.close(), some Matplotlib/Cartopy versions
+            # leave a plain FigureCanvasBase without get_renderer().
+            # Request an Agg renderer as a lightweight fallback.  The map
+            # has already been drawn by savefig, so no second Cartopy draw
+            # (and no second set of online relief tile requests) is needed.
+            canvas = fig.canvas
+            if not hasattr(canvas, "get_renderer"):
+                from matplotlib.backends.backend_agg import FigureCanvasAgg
+                canvas = FigureCanvasAgg(fig)
+            renderer = canvas.get_renderer()
             tight = fig.get_tightbbox(renderer)  # inches
             axes = ax.get_window_extent(renderer).transformed(
                 fig.dpi_scale_trans.inverted()
@@ -198,6 +204,7 @@ def enable_webcam_georeferencing(lib):
             }
             target = Path(str(filepath) + '.geo.json')
             target.write_text(json.dumps(metadata), encoding='utf-8')
+            print(f"WEB-CAM GEO: positiegegevens opgeslagen voor {Path(filepath).name}")
         except Exception as exc:
             # A map without hotspots is much better than a failed forecast.
             print(f"WAARSCHUWING: webcam-overlay overgeslagen ({exc})")
