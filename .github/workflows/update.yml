@@ -2,8 +2,6 @@
 name: Update SnowHybrid + ECMWF maps (hourly)
 
 on:
-  schedule:
-    - cron: '37 * * * *'
 
   workflow_dispatch:
     inputs:
