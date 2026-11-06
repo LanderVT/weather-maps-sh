@@ -32,7 +32,7 @@ jobs:
     env:
       # HYBRID MODEL
       HYBRID_GRID_STEP: '0.008'
-      HYBRID_DPI: '200'
+      HYBRID_DPI: '400'
       HYBRID_MIN_MODELS: '2'
       HYBRID_ESRI_RELIEF: '1'
 
@@ -41,13 +41,13 @@ jobs:
       ECMWF_N_DAYS: '7'
       ECMWF_GRID_STEP_ALPS: '0.008'
       ECMWF_GRID_STEP_FULL: '0.016'
-      ECMWF_DPI: '200'
+      ECMWF_DPI: '400'
       ECMWF_ESRI_RELIEF: '1'
 
       # ICON-D2 MODEL - 48 uur
       # Alleen Alpen; gebruik 'alps,full' voor West-Europa erbij.
       ICON_D2_AREAS: 'alps'
-      ICON_D2_DPI: '200'
+      ICON_D2_DPI: '400'
       ICON_D2_GRID_STEP_ALPS: '0.008'
       ICON_D2_GRID_STEP_FULL: '0.012'
       ICON_D2_ESRI_RELIEF: '1'
