@@ -1,4 +1,4 @@
-"""Cloud runner: fresh Hybrid + standalone ECMWF forecasts -> GitHub Pages.
+"""Cloud runner: fresh Hybrid + ECMWF + ICON-D2 forecasts -> GitHub Pages.
 
 Runs the original science scripts in an isolated HOME, never uploads GRIB/NetCDF
 or intermediate arrays. Every publish is a new self-contained website; there is
@@ -27,12 +27,15 @@ SOURCES = (
     "SnowHybrid.py", "SnowDays_AROME.py", "SnowDays_AROME-AT.py",
     "SnowDays_ICON-CH1.py", "SnowDays_ICON-CH2.py",
     "SnowDays_ICON-D2.py", "SnowDays_ECMWF.py", "run_ecmwf.py",
+    "SnowAll_ICON-D2.py", "run_icon_d2.py",
 )
-MODELS = ("hybrid", "ecmwf")
-MODEL_NAMES = {"hybrid": "Hybrid Model", "ecmwf": "ECMWF Model"}
+MODELS = ("hybrid", "ecmwf", "icon_d2")
+MODEL_NAMES = {
+    "hybrid": "Hybrid Model", "ecmwf": "ECMWF Model", "icon_d2": "ICON-D2 Model"
+}
 GROUPS = (
     "Sneeuwval per dag", "Cumulatieve sneeuwval", "Nieuwe sneeuw op de grond",
-    "Kans op sneeuw", "Modelonenigheid",
+    "Sneeuwgrens", "Vorstgrens", "Kans op sneeuw", "Modelonenigheid",
 )
 
 
@@ -60,6 +63,10 @@ def ensure_logo(tmp_home: Path) -> None:
 
 def map_group(name: str) -> str:
     stem = name.lower()
+    if "vorstgrens" in stem:
+        return "Vorstgrens"
+    if "sneeuwgrens" in stem:
+        return "Sneeuwgrens"
     if "kans" in stem:
         return "Kans op sneeuw"
     if "onenigheid" in stem:
@@ -72,14 +79,27 @@ def map_group(name: str) -> str:
 
 
 def display_title(name: str) -> str:
-    """Human-readable label, while keeping filenames unchanged."""
+    """Friendly times in Belgium/Swiss local time; model timestamps stay UTC."""
+    from zoneinfo import ZoneInfo
+
     stem = Path(name).stem
-    match = re.search(r"_(alps|full)_(\d{8})_(\d{2})z_f(\d{3})-(\d{3})", stem)
+    match = re.search(r"_(alps|full)_(\d{8})_(\d{2})z_f(\d{3})(?:-(\d{3}))?", stem)
     if not match:
         return stem.replace("_", " ")
     area, ymd, hour, start, end = match.groups()
     region = "Alpen" if area == "alps" else "West-Europa"
-    return f"{region} · +{int(start)}–{int(end)} uur · modelrun {ymd[6:8]}/{ymd[4:6]} {hour} UTC"
+    run = datetime.strptime(ymd + hour, "%Y%m%d%H").replace(tzinfo=timezone.utc)
+    tz = ZoneInfo("Europe/Brussels")
+    days = ("ma", "di", "wo", "do", "vr", "za", "zo")
+
+    def label(dt):
+        local = dt.astimezone(tz)
+        return f"{days[local.weekday()]} {local:%d/%m %H:%M}"
+
+    if end is None:
+        return f"{region} · {label(run + timedelta(hours=int(start)))}"
+    return (f"{region} · {label(run + timedelta(hours=int(start)))} "
+            f"- {label(run + timedelta(hours=int(end)))}")
 
 
 def collect_models(errors: dict[str, str]) -> dict[str, dict]:
@@ -116,7 +136,7 @@ def collect_models(errors: dict[str, str]) -> dict[str, dict]:
 
 
 def make_site(errors: dict[str, str] | None = None) -> str:
-    """Publish fresh independent Hybrid/ECMWF tabs (or explicit error panels)."""
+    """Publish three independent model tabs (or explicit error panels)."""
     errors = errors or {}
     results = collect_models(errors)
     if SITE.exists():
@@ -143,7 +163,7 @@ def make_site(errors: dict[str, str] | None = None) -> str:
                 shutil.copy2(source, destination / source.name)
 
     successes = sum(int(r["available"]) for r in results.values())
-    overall = "ok" if successes == 2 else "partial" if successes == 1 else "error"
+    overall = "ok" if successes == len(MODELS) else "partial" if successes > 0 else "error"
     status = {
         "status": overall,
         "updated_utc": now.isoformat(timespec="seconds"),
@@ -193,9 +213,13 @@ def make_site(errors: dict[str, str] | None = None) -> str:
             )
             if model == "hybrid":
                 intro = f"48 uur · {len(result['images'])} kaarten · {len(model_runs)} modellen"
-            else:
+            elif model == "ecmwf":
                 regions = ", ".join("Alpen" if a == "alps" else "West-Europa" for a in meta.get("areas", []))
                 intro = f"{escape(str(meta.get('days', 7)))} dagen · {regions} · {len(result['images'])} kaarten"
+            else:
+                regions = ", ".join("Alpen" if a == "alps" else "West-Europa" for a in meta.get("areas", []))
+                intro = (f"ICON-D2 · 48 uur · {regions} · {len(result['images'])} kaarten "
+                         f"· sneeuw- en vorstgrens om de 6 uur")
             detail = f'<p class="detail">{runs}</p>' if runs else ""
             markup = (
                 f'<p class="panel-intro">{intro}</p>{detail}'
@@ -219,7 +243,7 @@ def make_site(errors: dict[str, str] | None = None) -> str:
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-<title>Sneeuwhoogte · Hybrid & ECMWF</title>
+<title>Sneeuwhoogte · Hybrid, ECMWF & ICON-D2</title>
 <style>
 :root {{ color-scheme:light; font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; }}
 * {{ box-sizing:border-box; }}
@@ -250,20 +274,21 @@ footer {{ max-width:1240px; margin:0 auto; color:#65758b; padding:0 18px 28px; f
 </head>
 <body>
 <header><h1>Sneeuwverwachting Alpen</h1>
-<p>Hybride voorspelling (6 modellen) en afzonderlijke ECMWF-verwachting</p>
+<p>Hybride voorspelling, ECMWF en ICON-D2 als afzonderlijke modellen</p>
 <p>Laatst verwerkt: {now_str}</p></header>
 <main>
 <nav class="tabs" role="tablist" aria-label="Kies het weermodel">
 <button type="button" id="tab-hybrid" class="tab" role="tab" aria-controls="panel-hybrid" aria-selected="true" data-model="hybrid">Hybrid Model</button>
 <button type="button" id="tab-ecmwf" class="tab" role="tab" aria-controls="panel-ecmwf" aria-selected="false" data-model="ecmwf">ECMWF Model</button>
+<button type="button" id="tab-icon_d2" class="tab" role="tab" aria-controls="panel-icon_d2" aria-selected="false" data-model="icon_d2">ICON-D2 Model</button>
 </nav>
 {''.join(panels)}
 </main>
 <footer>Experimentele sneeuwverwachting, geen officiële waarschuwing. Bronnen: Météo-France, GeoSphere Austria, MeteoSwiss, DWD en ECMWF. Controleer de modelrun en het actualiteitstijdstip.</footer>
 <script>
 function selectModel(model) {{
-  if (!['hybrid','ecmwf'].includes(model)) model='hybrid';
-  for (const key of ['hybrid','ecmwf']) {{
+  if (!['hybrid','ecmwf','icon_d2'].includes(model)) model='hybrid';
+  for (const key of ['hybrid','ecmwf','icon_d2']) {{
     document.getElementById('panel-'+key).hidden = key !== model;
     document.getElementById('tab-'+key).setAttribute('aria-selected', String(key === model));
   }}
@@ -289,9 +314,9 @@ if (Date.now() - updated > 6*60*60*1000) {{
 </body></html>'''
     (SITE / "index.html").write_text(html, encoding="utf-8")
     print(
-        f"Website: {overall}; Hybrid {len(results['hybrid']['images'])} PNG, "
-        f"ECMWF {len(results['ecmwf']['images'])} PNG; total {total_bytes / 1e6:.1f} MB",
-        flush=True,
+        f"Website: {overall}; " + ", ".join(
+            f"{MODEL_NAMES[m]} {len(results[m]['images'])} PNG" for m in MODELS
+        ) + f"; total {total_bytes / 1e6:.1f} MB", flush=True,
     )
     return overall
 
@@ -301,12 +326,19 @@ def check_sources() -> None:
     if missing:
         raise FileNotFoundError("Ontbrekende Python-bestanden: " + ", ".join(missing))
 
-    for module_name in ("numpy", "matplotlib", "scipy", "requests", "xarray", "netCDF4", "eccodes", "cartopy", "PIL"):
+    for module_name in ("numpy", "matplotlib", "scipy", "requests", "xarray", "netCDF4", "eccodes", "cartopy", "cfgrib", "PIL"):
         importlib.import_module(module_name)
         print(f"  Dependency OK: {module_name}", flush=True)
     for path in sorted(ROOT.glob("SnowDays_*.py")):
         module_name = "check_" + path.stem.replace("-", "_")
         spec = importlib.util.spec_from_file_location(module_name, path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("Cannot import " + path.name)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        print(f"  Model script OK: {path.name}", flush=True)
+    for path in (ROOT / "SnowAll_ICON-D2.py", ROOT / "run_icon_d2.py"):
+        spec = importlib.util.spec_from_file_location("check_" + path.stem.replace("-", "_"), path)
         if spec is None or spec.loader is None:
             raise RuntimeError("Cannot import " + path.name)
         module = importlib.util.module_from_spec(spec)
@@ -331,7 +363,7 @@ def main() -> None:
         shutil.rmtree(WORK)
     if SITE.exists():
         shutil.rmtree(SITE)
-    for folder in (MAPS / "hybrid", MAPS / "ecmwf", WORK / "home", WORK / "tmp", WORK / "matplotlib"):
+    for folder in (MAPS / "hybrid", MAPS / "ecmwf", MAPS / "icon_d2", WORK / "home", WORK / "tmp", WORK / "matplotlib"):
         folder.mkdir(parents=True, exist_ok=True)
     errors: dict[str, str] = {}
     try:
@@ -344,10 +376,11 @@ def main() -> None:
             "XDG_CACHE_HOME": str(WORK / "cache"),
             "HYBRID_OUTPUT_DIR": str(MAPS / "hybrid"),
             "ECMWF_OUTPUT_DIR": str(MAPS / "ecmwf"),
+            "ICON_D2_OUTPUT_DIR": str(MAPS / "icon_d2"),
             "PYTHONUNBUFFERED": "1",
             "MPLBACKEND": "Agg",
         })
-        for model, script in (("hybrid", "SnowHybrid.py"), ("ecmwf", "run_ecmwf.py")):
+        for model, script in (("hybrid", "SnowHybrid.py"), ("ecmwf", "run_ecmwf.py"), ("icon_d2", "run_icon_d2.py")):
             print(f"\n=== RUNNING {MODEL_NAMES[model]} ===", flush=True)
             try:
                 subprocess.run([sys.executable, str(ROOT / script)], cwd=ROOT, env=env, check=True)
