@@ -1,12 +1,12 @@
 
-name: Update SnowHybrid + ECMWF maps (hourly)
+name: Update SnowHybrid + ECMWF + ICON-D2 maps (hourly)
 
+# cron-job.org starts this workflow every hour.
 on:
-
   workflow_dispatch:
     inputs:
       check_only:
-        description: 'Only check scripts and dependencies (no downloads or website update)'
+        description: 'Check Python scripts and libraries only; no model downloads'
         required: false
         type: boolean
         default: false
@@ -17,7 +17,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: snowhybrid-ecmwf-pages-v3
+  group: snowhybrid-ecmwf-icon-d2-pages-v4
   cancel-in-progress: false
 
 jobs:
@@ -30,19 +30,28 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
 
     env:
-      # Hybrid Model: 6 modellen, 48 uur
+      # HYBRID MODEL
       HYBRID_GRID_STEP: '0.008'
       HYBRID_DPI: '200'
       HYBRID_MIN_MODELS: '2'
       HYBRID_ESRI_RELIEF: '1'
 
-      # ECMWF Model: afzonderlijke 7-daagse verwachting
+      # ECMWF MODEL - 7 dagen
       ECMWF_AREAS: 'alps'
       ECMWF_N_DAYS: '7'
       ECMWF_GRID_STEP_ALPS: '0.008'
       ECMWF_GRID_STEP_FULL: '0.016'
       ECMWF_DPI: '200'
       ECMWF_ESRI_RELIEF: '1'
+
+      # ICON-D2 MODEL - 48 uur
+      # Alleen Alpen; gebruik 'alps,full' voor West-Europa erbij.
+      ICON_D2_AREAS: 'alps'
+      ICON_D2_DPI: '200'
+      ICON_D2_GRID_STEP_ALPS: '0.008'
+      ICON_D2_GRID_STEP_FULL: '0.012'
+      ICON_D2_ESRI_RELIEF: '1'
+      ICON_D2_MAX_RUN_AGE_H: '24'
 
     steps:
       - name: Checkout
@@ -62,13 +71,43 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
+          python -m pip install 'cfgrib>=0.9.14,<1'
 
-      - name: Check eight scripts and libraries
+      - name: Check all scripts and libraries
         run: python run_forecast.py --check
 
-      - name: Generate Hybrid + standalone ECMWF maps and website
+      - name: Generate Hybrid, ECMWF and ICON-D2 maps and website
         if: inputs.check_only != true
         run: python run_forecast.py
+
+      - name: Validate website before deployment
+        if: inputs.check_only != true
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          p = Path('site/status.json')
+          if not p.is_file():
+              raise SystemExit('No website status.json was generated')
+
+          status = json.loads(p.read_text(encoding='utf-8'))
+
+          for model in ('hybrid', 'ecmwf', 'icon_d2'):
+              entry = status['models'][model]
+              print(f"{model}: {entry['status']}, {entry['map_count']} maps")
+
+          for model in ('hybrid', 'ecmwf'):
+              if status['models'][model]['status'] != 'ok':
+                  raise SystemExit(
+                      f'Existing {model} forecast failed; preserving previous website'
+                  )
+
+          if status['models']['icon_d2']['status'] != 'ok':
+              print('::warning::ICON-D2 failed; only Hybrid and ECMWF will be updated')
+          PY
+
+          du -sh site
 
       - name: Configure Pages
         if: inputs.check_only != true
@@ -84,23 +123,3 @@ jobs:
         if: inputs.check_only != true
         id: deploy
         uses: actions/deploy-pages@v4
-
-      - name: Check both forecasts completed
-        if: inputs.check_only != true
-        run: |
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          p = Path('site/status.json')
-
-          if not p.is_file():
-              raise SystemExit('No website status file')
-
-          status = json.loads(p.read_text(encoding='utf-8'))
-
-          if status.get('status') != 'ok':
-              raise SystemExit('One or both forecasts failed; see logs')
-
-          print('Hybrid and ECMWF forecasts published successfully')
-          PY
