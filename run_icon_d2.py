@@ -91,8 +91,18 @@ def main() -> None:
 
     selected_run = None
     selected_start = None
+    recorded_extents = {}
     original_newest = mod.newest_common_run
     original_current_lead = mod.current_lead
+    original_determine_extent = mod.determine_extent
+
+    def record_extent(x, y, valid, area):
+        # Reuse the EXACT existing snow/altitude map extent on new maps.
+        extent = original_determine_extent(x, y, valid, area)
+        recorded_extents[area] = extent
+        return extent
+
+    mod.determine_extent = record_extent
 
     def record_run(session):
         nonlocal selected_run
@@ -119,9 +129,36 @@ def main() -> None:
     windows = mod.local_day_windows(selected_run, selected_start)
     rename_snow_maps(out, selected_run, selected_start, areas, windows)
 
+    # EXTRA, OPTIONAL: 1500/3000 m temperature every 6 hours. These maps
+    # never affect any existing ICON-D2 calculations. If DWD temporarily
+    # omits a pressure-level field, keep the complete original forecast.
+    temperature_count = 0
+    if os.environ.get("ICON_D2_TEMPERATURE", "1") != "0":
+        try:
+            from icon_d2_temperature import produce_temperature_maps
+            created = produce_temperature_maps(
+                mod, selected_run, areas, recorded_extents
+            )
+            temperature_count = len(created)
+            required = len(areas) * 2 * len(mod.FORECAST_HOURS)
+            if temperature_count != required:
+                raise RuntimeError(
+                    f"Incomplete temperature series: {temperature_count}/{required}"
+                )
+            print(f"ICON-D2 temperature: {temperature_count} new maps", flush=True)
+        except Exception as exc:
+            # Keep the existing snow/snowline/freezing-line maps.
+            for filename in out.glob("icon_d2_temperatuur_*.png"):
+                filename.unlink(missing_ok=True)
+            temperature_count = 0
+            print(
+                f"::warning::ICON-D2 temperature skipped: {type(exc).__name__}: {exc}. "
+                "All existing ICON-D2 maps remain available.", flush=True
+            )
+
     found = sorted(out.glob("*.png"))
     count_per_area = 2 * len(mod.FORECAST_HOURS) + len(windows) + 1
-    expected = len(areas) * count_per_area
+    expected = len(areas) * count_per_area + temperature_count
     if len(found) != expected:
         raise RuntimeError(f"ICON-D2 produced {len(found)}/{expected} maps; check the plot errors above")
 
@@ -134,6 +171,10 @@ def main() -> None:
         "areas": list(areas),
         "days": len(windows),
         "altitude_step_hours": 6,
+        "temperature_step_hours": 6,
+        "temperature_heights_m": [1500, 3000] if temperature_count else [],
+        "temperature_map_count": temperature_count,
+        "temperature_method": "T850/T700 linearly interpolated in FI-derived height (approximate)",
         "snow_intervals": "Belgian calendar days, cumulative to run +48h",
         "dpi": dpi,
     }
