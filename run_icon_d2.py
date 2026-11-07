@@ -84,6 +84,11 @@ def main() -> None:
         if not 0.004 <= mod.SNOW_INTERP_STEP[area] <= 0.04:
             raise ValueError(f"Invalid ICON-D2 snow grid resolution for {area}")
 
+    # UI ONLY: adopt the uploaded dark/slate design. All DWD fields, time
+    # windows and the existing grey snow-/freezing-line logic remain intact.
+    from snow_dark_adapter import install_icon_d2
+    install_icon_d2(mod)
+
     selected_run = None
     selected_start = None
     original_newest = mod.newest_common_run

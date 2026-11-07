@@ -538,6 +538,12 @@ def main():
 
         xf, yf, dem = lib.load_dem(session, extent)
 
+        # UI ONLY: use the same dark map layout as the supplied ICON-D2 design.
+        # The six models, mass calculations and weather fields are untouched.
+        from snow_dark_adapter import install_snowdays
+        style_terrain = install_snowdays(lib, webcam=True)
+        style_terrain(xf, yf, dem)
+
         shape = dem.shape
 
         streams = {}

@@ -30,9 +30,9 @@ def main() -> None:
 
     # Only the *standalone* ECMWF panel ignores the 12-hour freshness limit.
     # The Hybrid process loads its own copy of SnowDays_ECMWF.py and keeps
-    # MAX_RUN_AGE_H = 24
-    mod.MAX_RUN_AGE_H = 24
-    print("Standalone ECMWF: no 12-hour model-age cutoff; using latest complete available run", flush=True)
+    # MAX_RUN_AGE_H = 12, exactly as before.
+    mod.MAX_RUN_AGE_H = float(os.environ.get("ECMWF_MAX_RUN_AGE_H", "24"))
+    print(f"Standalone ECMWF: maximum model age = {mod.MAX_RUN_AGE_H:g} hours", flush=True)
 
     areas = tuple(
         s.strip().lower() for s in os.environ.get("ECMWF_AREAS", "alps").split(",")
@@ -60,6 +60,18 @@ def main() -> None:
     mod.LOGO_PATH = Path.home() / "logo-sneeuwhoogte.png"
     if not mod.LOGO_PATH.exists():
         raise FileNotFoundError(f"ECMWF logo missing: {mod.LOGO_PATH}")
+
+    # UI ONLY: replace the map painter while retaining every ECMWF calculation.
+    from snow_dark_adapter import install_snowdays
+    set_style_terrain = install_snowdays(mod, webcam=False)
+    original_load_dem = mod.load_dem
+
+    def load_dem_for_style(*args, **kwargs):
+        x, y, dem = original_load_dem(*args, **kwargs)
+        set_style_terrain(x, y, dem)
+        return x, y, dem
+
+    mod.load_dem = load_dem_for_style
 
     print(
         f"Standalone ECMWF: areas={areas}, days={mod.N_DAYS}, DPI={mod.DPI}, "
