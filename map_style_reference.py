@@ -1124,7 +1124,7 @@ def finish_map_dark(
         )
         art.set_path_effects(glow)
 
-    dark_header(fig, title, subtitle, date_text)
+    dark_header(fig, title, "", date_text)  # Geen subtitel op de kaarten
     dark_footer(fig, cmap, norm, cbar_label, ticks, ticklabels, run)
     add_cities(fig, ax, extent, area, None)
 

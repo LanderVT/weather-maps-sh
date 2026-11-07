@@ -19,6 +19,33 @@ from matplotlib.colors import BoundaryNorm, ListedColormap, LinearSegmentedColor
 
 import map_style_reference as style
 
+# Exact dezelfde neutrale tint voor sneeuwgrens en vorstgrens.
+ICON_D2_MASK_GRAY = "#c8cdd3"
+
+
+def icon_d2_grey_mask(kind, field, hsurf):
+    """Display-only mask: DWD undefined snow limit or terrain above a limit.
+
+    SNOWLMT can be missing/NaN over cold high-altitude terrain. On the dark
+    basemap those cells previously appeared almost black, even when the
+    freezing-level map displayed the same area in light gray. These pixels
+    now get the same solid light-gray fill. No model data are changed.
+    """
+    field = np.ma.filled(np.ma.asarray(field, dtype=float), np.nan)
+    if hsurf is None:
+        return np.zeros(field.shape, dtype=bool)
+    hsurf = np.ma.filled(np.ma.asarray(hsurf, dtype=float), np.nan)
+    if hsurf.shape != field.shape:
+        raise ValueError("ICON-D2 terrain grid differs from snow/freezing limit")
+    terrain_valid = np.isfinite(hsurf)
+    if kind == "hzerocl":
+        return terrain_valid & np.isfinite(field) & (field <= hsurf + 10.0)
+    if kind == "snowlmt":
+        # Also cover undefined SNOWLMT cells: previously the almost-black
+        # background was visible here, especially along high mountain ridges.
+        return terrain_valid & (~np.isfinite(field) | (hsurf >= field))
+    return np.zeros(field.shape, dtype=bool)
+
 
 def configure(mod, *, theme: str | None = None) -> None:
     """Copy the model's existing palettes and output settings to the renderer."""
@@ -162,19 +189,8 @@ def install_icon_d2(mod):
         cmap.set_bad((0, 0, 0, 0))
         cmap.set_over(mod.ALT_COLORS[-1])
         norm = BoundaryNorm(mod.ALT_LEVELS, cmap.N)
-        field = np.asarray(field, dtype=float)
-        mask = np.zeros(field.shape, dtype=bool)
-        if hsurf is not None:
-            if np.shape(hsurf) != field.shape:
-                raise ValueError("ICON-D2 terrain grid differs from snow/freezing limit")
-            if kind == "hzerocl":
-                # Keep the earlier gray correction: DWD HZEROCL=HSURF when
-                # the entire atmospheric column is below freezing.
-                mask = (np.isfinite(field) & np.isfinite(hsurf)
-                        & (field <= hsurf + 10.0))
-            else:
-                # Keep the earlier gray area above the ICON snow limit.
-                mask = np.isfinite(field) & np.isfinite(hsurf) & (hsurf >= field)
+        field = np.ma.filled(np.ma.asarray(field, dtype=float), np.nan)
+        mask = icon_d2_grey_mask(kind, field, hsurf)
         z = np.ma.masked_where(mask | ~np.isfinite(field), field)
         ax.contourf(
             x, y, z, levels=mod.ALT_LEVELS, cmap=cmap, norm=norm,
@@ -184,8 +200,8 @@ def install_icon_d2(mod):
         if mask.any():
             ax.contourf(
                 x, y, mask.astype(float), levels=[0.5, 1.5],
-                colors=["#c8cdd3"], transform=proj, zorder=6,
-                antialiased=True,
+                colors=[ICON_D2_MASK_GRAY], transform=proj, zorder=6,
+                antialiased=False,
             )
             print(f"{kind}: {int(mask.sum())} grey terrain cells", flush=True)
         noun = "Vorstgrens" if kind == "hzerocl" else "Sneeuwgrens"
