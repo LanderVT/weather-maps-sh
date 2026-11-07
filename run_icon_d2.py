@@ -129,18 +129,18 @@ def main() -> None:
     windows = mod.local_day_windows(selected_run, selected_start)
     rename_snow_maps(out, selected_run, selected_start, areas, windows)
 
-    # EXTRA, OPTIONAL: 1500/3000 m temperature every 6 hours. These maps
+    # EXTRA, OPTIONAL: 1500/2000/3000 m temperature every 6 hours. These maps
     # never affect any existing ICON-D2 calculations. If DWD temporarily
     # omits a pressure-level field, keep the complete original forecast.
     temperature_count = 0
     if os.environ.get("ICON_D2_TEMPERATURE", "1") != "0":
         try:
-            from icon_d2_temperature import produce_temperature_maps
+            from icon_d2_temperature import HEIGHTS_M, produce_temperature_maps
             created = produce_temperature_maps(
                 mod, selected_run, areas, recorded_extents
             )
             temperature_count = len(created)
-            required = len(areas) * 2 * len(mod.FORECAST_HOURS)
+            required = len(areas) * len(HEIGHTS_M) * len(mod.FORECAST_HOURS)
             if temperature_count != required:
                 raise RuntimeError(
                     f"Incomplete temperature series: {temperature_count}/{required}"
@@ -172,7 +172,7 @@ def main() -> None:
         "days": len(windows),
         "altitude_step_hours": 6,
         "temperature_step_hours": 6,
-        "temperature_heights_m": [1500, 3000] if temperature_count else [],
+        "temperature_heights_m": list(HEIGHTS_M) if temperature_count else [],
         "temperature_map_count": temperature_count,
         "temperature_method": "T850/T700 linearly interpolated in FI-derived height (approximate)",
         "snow_intervals": "Belgian calendar days, cumulative to run +48h",

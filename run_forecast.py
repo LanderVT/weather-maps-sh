@@ -51,7 +51,7 @@ HYBRID_WEBCAMS = (
 
 GROUPS = (
     "Sneeuwval per dag", "Cumulatieve sneeuwval", "Nieuwe sneeuw op de grond",
-    "Sneeuwgrens", "Vorstgrens", "Temperatuur 1500 m", "Temperatuur 3000 m",
+    "Sneeuwgrens", "Vorstgrens", "Temperatuur 1500 m", "Temperatuur 2000 m", "Temperatuur 3000 m",
     "Kans op sneeuw", "Modelonenigheid",
 )
 
@@ -82,6 +82,8 @@ def map_group(name: str) -> str:
     stem = name.lower()
     if "temperatuur_1500m" in stem:
         return "Temperatuur 1500 m"
+    if "temperatuur_2000m" in stem:
+        return "Temperatuur 2000 m"
     if "temperatuur_3000m" in stem:
         return "Temperatuur 3000 m"
     if "vorstgrens" in stem:
