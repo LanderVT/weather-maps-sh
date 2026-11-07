@@ -37,7 +37,7 @@ jobs:
       HYBRID_ESRI_RELIEF: '1'
 
       # ECMWF MODEL - 7 dagen
-      ECMWF_AREAS: 'alps, full''
+      ECMWF_AREAS: 'alps, full'
       ECMWF_N_DAYS: '7'
       ECMWF_GRID_STEP_ALPS: '0.008'
       ECMWF_GRID_STEP_FULL: '0.016'
