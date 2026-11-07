@@ -12,17 +12,11 @@ New maps follow the existing dark/slate render style and are generated for
 +0, +6, ..., +48 h, using the same run, map extent, relief and timestamps as
 the existing ICON-D2 maps. Do not execute this module directly; it is called
 by run_icon_d2.py after the existing products have been written.
-
-DWD file form:
-icon-d2_germany_regular-lat-lon_pressure-level_YYYYMMDDHH_000_850_t.grib2.bz2
-and the equivalent 700, fi combinations.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-import os
-from pathlib import Path
 
 import matplotlib.colors as mcolors
 import matplotlib.patheffects as pe
@@ -45,7 +39,7 @@ MASK_GRAY = "#c8cdd3"
 def pressure_level_url(
     mod, run: datetime, lead: int, level: int, parameter: str
 ):
-    """DWD open-data naming: lowercase 't' and 'fi'."""
+    """DWD pressure-level file naming."""
 
     if level not in PRESSURE_LEVELS or parameter not in ("t", "fi"):
         raise ValueError(
@@ -53,7 +47,7 @@ def pressure_level_url(
         )
 
     filename = (
-        f"icon-d2_germany_regular-lat-lon_pressure-level_"
+        "icon-d2_germany_regular-lat-lon_pressure-level_"
         f"{run:%Y%m%d%H}_{lead:03d}_{level}_{parameter}.grib2.bz2"
     )
 
@@ -68,21 +62,12 @@ def kelvin_to_celsius(raw, unit: str):
     data = np.asarray(raw, dtype=float)
     unit = unit.strip().lower()
 
-    if unit in (
-        "k",
-        "kelvin",
-        "degrees kelvin",
-        "degree kelvin",
-    ):
+    if unit in ("k", "kelvin", "degrees kelvin", "degree kelvin"):
         data = data - 273.15
 
     elif unit in (
-        "c",
-        "degc",
-        "degree celsius",
-        "degrees celsius",
-        "celsius",
-        "°c",
+        "c", "degc", "degree celsius", "degrees celsius",
+        "celsius", "°c",
     ):
         pass
 
@@ -107,28 +92,20 @@ def geopotential_to_metres(raw, unit: str):
     unit = unit.replace("²", "2").replace("−", "-")
 
     if unit in (
-        "m",
-        "gpm",
-        "geopotentialmetre",
-        "geopotentialmeter",
+        "m", "gpm", "geopotentialmetre", "geopotentialmeter",
     ):
         return data
 
     if unit in (
-        "m**2s**-2",
-        "m2s-2",
-        "m2/s2",
-        "m^2s^-2",
-        "m**2s-2",
+        "m**2s**-2", "m2s-2", "m2/s2",
+        "m^2s^-2", "m**2s-2",
     ):
         return data / GRAVITY
 
     finite = data[np.isfinite(data)]
 
     if finite.size == 0:
-        raise ValueError(
-            "All geopotential values are missing"
-        )
+        raise ValueError("All geopotential values are missing")
 
     typical = float(np.median(finite))
 
@@ -151,11 +128,10 @@ def calculate_fixed_height_temperature(
     target_m: int,
     hsurf_m,
 ):
-    """Interpolate temperature vertically between 850 and 700 hPa.
+    """Interpolate T between 850 and 700 hPa.
 
     Small extrapolations from the closest pressure level are allowed.
-
-    Temperatures inside the mountains are masked.
+    Values inside mountains are masked.
     """
 
     t850_c = np.asarray(t850_c, dtype=float)
@@ -224,35 +200,36 @@ def calculate_fixed_height_temperature(
     return result, terrain_mask
 
 
-def temperature_colormap():
-    """Dark temperature colors for the slate Alpine relief.
+# ============================================================
+# TEMPERATURE COLORS
+# ============================================================
 
-    Avoid near-white and pale beige around 0 C.
-    Keep the same temperature scale for both altitudes.
-    """
+def temperature_colormap():
+    """Blue-to-yellow scale with stronger contrast around 0 C."""
 
     anchors = [
-        (0.00, "#251451"),  # -30 C: violet
-        (0.20, "#213b91"),  # -20 C: deep blue
-        (0.30, "#245bac"),  # -15 C: blue
-        (0.40, "#2a7daa"),  # -10 C: dark cyan-blue
-        (0.50, "#478caa"),  #  -5 C: muted blue
-        (0.60, "#637285"),  #   0 C: slate blue-gray
-        (0.70, "#ac805f"),  #  +5 C: muted copper
-        (0.80, "#d16a4c"),  # +10 C: terracotta
-        (0.90, "#ce484c"),  # +15 C: red
-        (1.00, "#a32d50"),  # +20 C: red-magenta
+        (0.00,  "#311d62"),  # -30 C: violet
+        (0.15,  "#2a4caa"),  # deep blue
+        (0.30,  "#237fc3"),  # blue
+        (0.45,  "#74c5ed"),  # light blue
+        (0.53,  "#9dd8f4"),  # icy blue
+        (0.58,  "#76bde8"),  # around -2 C: clearer blue
+        (0.625, "#f0f1eb"),  # near 0 C: neutral transition
+        (0.66,  "#ffe28b"),  # around +2 C: yellow
+        (0.73,  "#ffd17b"),  # yellow-gold
+        (0.86,  "#f7a04f"),  # orange
+        (1.00,  "#d73b43"),  # +20 C: red
     ]
 
     cmap = mcolors.LinearSegmentedColormap.from_list(
-        "icon_d2_temperature_dark_slate",
+        "icon_d2_temperature",
         anchors,
         N=256,
     )
 
     cmap.set_bad((0, 0, 0, 0))
-    cmap.set_under(anchors[0][1])
-    cmap.set_over(anchors[-1][1])
+    cmap.set_under("#311d62")
+    cmap.set_over("#d73b43")
 
     norm = mcolors.BoundaryNorm(
         TEMP_LEVELS_C,
@@ -261,6 +238,10 @@ def temperature_colormap():
 
     return cmap, norm
 
+
+# ============================================================
+# MAP PLOTTING
+# ============================================================
 
 def render_temperature_map(
     mod,
@@ -274,9 +255,7 @@ def render_temperature_map(
     lead,
     target_m,
 ):
-    """Render a temperature map using the shared dark layout."""
-
-    import cartopy.crs as ccrs
+    """Render temperature map with the shared dark layout."""
 
     fig, ax, proj = style.dark_axes(extent)
 
@@ -293,7 +272,7 @@ def render_temperature_map(
         norm=norm,
         extend="both",
         transform=proj,
-        alpha=0.76,
+        alpha=0.94,
         zorder=3,
         antialiased=True,
     )
@@ -367,11 +346,12 @@ def render_temperature_map(
     return outfile
 
 
-def produce_temperature_maps(mod, run, areas, extents):
-    """Generate temperature maps for 1500 m and 3000 m.
+# ============================================================
+# DOWNLOAD DATA + GENERATE MAPS
+# ============================================================
 
-    Called by run_icon_d2.py after the snow maps have been produced.
-    """
+def produce_temperature_maps(mod, run, areas, extents):
+    """Generate temperature maps for 1500 m and 3000 m."""
 
     steps = tuple(mod.FORECAST_HOURS)
 
@@ -391,12 +371,10 @@ def produce_temperature_maps(mod, run, areas, extents):
     with requests.Session() as session:
 
         session.headers.update({
-            "User-Agent": (
-                "SneeuwhoogteNL-ICON-D2-temperature/1.0"
-            ),
+            "User-Agent": "SneeuwhoogteNL-ICON-D2-temperature/1.0",
         })
 
-        # Reuse the surface-height field.
+        # Reuse surface-height field from source cache.
         hfield = mod.load_hsurf(session, run)
 
         xsurf, ysurf, terrain_raw, terrain_unit = hfield
@@ -424,7 +402,7 @@ def produce_temperature_maps(mod, run, areas, extents):
             data = {}
             grid = None
 
-            # Four pressure-level fields per timestep.
+            # Four pressure-level fields per forecast step.
             for level in PRESSURE_LEVELS:
 
                 for param in ("t", "fi"):
