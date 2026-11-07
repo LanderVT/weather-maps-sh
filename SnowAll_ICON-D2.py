@@ -3,7 +3,7 @@
 ICON-D2 | Alle Sneeuwhoogte.nl-kaarten in een script
 
 1. Vorstgrens (HZEROCL): +0, +6, ..., +48 uur
-2. Sneeuwgrens (SNOWLMT): +0, +6, ..., +48 uur; HSURF-arcering
+2. Sneeuwgrens (SNOWLMT): +0, +6, ..., +48 uur; grijs boven sneeuwgrens
 3. Verse sneeuw (SNOW_GSP + SNOW_CON): lokale dagvensters en cumulatief
    tot +48 uur, met aftrek van reeds gevallen sneeuw sinds de modelrun
 
@@ -1372,53 +1372,36 @@ def plot_altitude(
                 "zonder 0 C-isotherm grijs weergegeven"
             )
 
-    if kind == "snowlmt" and hsurf is not None:
+    if kind == "snowlmt":
+        if hsurf is None:
+            print("WAARSCHUWING: HSURF ontbreekt; sneeuwgrensgebieden niet grijs weergegeven")
+        else:
+            # Zoals bij de vorstgrens: lichtgrijze, volledig dekkende zones.
+            # Hier ligt het ICON-modelterrein op of boven de sneeuwgrens.
+            # Behoud de oorspronkelijke SNOWLMT-waarden en de kleurenschaal.
+            # Ongeldige punten buiten het modeldomein blijven transparant.
+            if np.shape(field) != np.shape(hsurf):
+                raise ValueError("SNOWLMT en HSURF hebben verschillende roosters")
 
-        # De originele SnowLine-arcering waar terrein >= sneeuwgrens.
-        terrain_mask = np.where(
-            np.isfinite(field)
-            & np.isfinite(hsurf)
-            & (hsurf >= field),
-            1.0,
-            np.nan
-        )
-
-        if np.isfinite(terrain_mask).any():
-
-            hatch = ax.contourf(
-                x,
-                y,
-                terrain_mask,
-                levels=[0.5, 1.5],
-                colors="none",
-                hatches=["////"],
-                transform=proj,
-                zorder=6
+            above_snowline = (
+                np.isfinite(field)
+                & np.isfinite(hsurf)
+                & (hsurf >= field)
             )
 
-            hatch_color = (
-                0.45, 0.45, 0.45, 0.95
-            )
-
-            if hasattr(
-                hatch, "set_edgecolor"
-            ):
-
-                hatch.set_edgecolor(
-                    hatch_color
+            if np.any(above_snowline):
+                ax.contourf(
+                    x, y, above_snowline.astype(float),
+                    levels=[0.5, 1.5],
+                    colors=["#c8cdd3"],
+                    transform=proj,
+                    zorder=6,
+                    antialiased=True,
                 )
-
-                hatch.set_linewidth(0.0)
-
-            else:
-
-                for collection in hatch.collections:
-
-                    collection.set_edgecolor(
-                        hatch_color
-                    )
-
-                    collection.set_linewidth(0.0)
+                print(
+                    f"Sneeuwgrens: {np.count_nonzero(above_snowline)} "
+                    "modelpixels boven de sneeuwgrens grijs weergegeven"
+                )
 
     noun = (
         "Vorstgrens"
@@ -1441,6 +1424,8 @@ def plot_altitude(
     label = f"{noun} — {region_label(area)} (m)"
     if kind == "hzerocl" and np.any(no_level):
         label += " | grijs: geen 0 °C-niveau boven modelterrein"
+    elif kind == "snowlmt" and hsurf is not None and np.any(above_snowline):
+        label += " | grijs: terrein op/boven sneeuwgrens"
 
     finish_map(
         fig, ax, cf,
