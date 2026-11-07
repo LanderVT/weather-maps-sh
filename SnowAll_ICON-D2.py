@@ -1298,6 +1298,28 @@ def altitude_cmap(name):
 # 6. VORSTGRENS & SNEEUWGRENS
 # ============================================================
 
+def no_freezing_level_above_terrain(freezing_level, terrain, tolerance_m=10.0):
+    """Markeer ICON HZEROCL-vulwaarden als er geen 0 C-isotherm is.
+
+    DWD zet HZEROCL gelijk aan HSURF wanneer de VOLLEDIGE luchtkolom
+    onder nul is. De hoge waarden op bergtoppen betekenen dan niet
+    dat de vorstgrens hoog ligt. Een kleine tolerantie vangt afronding
+    van GRIB-waarden af. Dit gebruikt expliciet het ICON-modelterrein,
+    niet de gedetailleerde achtergrond-DEM van de kaart.
+    """
+    if terrain is None:
+        return np.zeros(np.shape(freezing_level), dtype=bool)
+    freezing_level = np.asarray(freezing_level)
+    terrain = np.asarray(terrain)
+    if freezing_level.shape != terrain.shape:
+        raise ValueError("HZEROCL en HSURF hebben verschillende roosters")
+    return (
+        np.isfinite(freezing_level)
+        & np.isfinite(terrain)
+        & (freezing_level <= terrain + tolerance_m)
+    )
+
+
 def plot_altitude(
     field, x, y, extent, area,
     run, step, kind, hsurf=None
@@ -1311,7 +1333,14 @@ def plot_altitude(
 
     cmap, norm = altitude_cmap(kind)
 
-    z = np.ma.masked_invalid(field)
+    # Bij volledig negatieve temperaturen rapporteert ICON HZEROCL=HSURF
+    # (DWD-fillwaarde). Kleur deze pixels grijs i.p.v. met een ogenschijnlijk
+    # hoge vorstgrens op bergtoppen. De oorspronkelijke data blijven intact.
+    no_level = (
+        no_freezing_level_above_terrain(field, hsurf)
+        if kind == "hzerocl" else np.zeros(np.shape(field), dtype=bool)
+    )
+    z = np.ma.masked_where(no_level, np.ma.masked_invalid(field))
 
     cf = ax.contourf(
         x, y, z,
@@ -1323,6 +1352,25 @@ def plot_altitude(
         zorder=3,
         antialiased=True
     )
+
+    if kind == "hzerocl":
+        if hsurf is None:
+            print("WAARSCHUWING: HSURF ontbreekt; vorstgrens-vulwaarden niet grijs gemaskeerd")
+        elif np.any(no_level):
+            # Grijze, dekkende zones: overal onder nul, dus geen vrij
+            # 0 C-niveau boven het modelterrein. Niet in de kleurenschaal.
+            ax.contourf(
+                x, y, no_level.astype(float),
+                levels=[0.5, 1.5],
+                colors=["#c8cdd3"],
+                transform=proj,
+                zorder=6,
+                antialiased=True,
+            )
+            print(
+                f"Vorstgrens: {np.count_nonzero(no_level)} modelpixels "
+                "zonder 0 C-isotherm grijs weergegeven"
+            )
 
     if kind == "snowlmt" and hsurf is not None:
 
@@ -1390,10 +1438,14 @@ def plot_altitude(
         f"{(run + timedelta(hours=step)):%Y%m%d_%H}z.png"
     )
 
+    label = f"{noun} — {region_label(area)} (m)"
+    if kind == "hzerocl" and np.any(no_level):
+        label += " | grijs: geen 0 °C-niveau boven modelterrein"
+
     finish_map(
         fig, ax, cf,
         fmt_date(valid_time),
-        f"{noun} — {region_label(area)} (m)",
+        label,
         ALT_LEVELS,
         outfile,
         extent,
@@ -1828,7 +1880,8 @@ def main():
                     plot_altitude(
                         frost[step],
                         x, y, extent, area,
-                        run, step, "hzerocl"
+                        run, step, "hzerocl",
+                        terrain
                     )
 
                     count += 1
