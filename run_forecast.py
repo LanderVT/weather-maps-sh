@@ -373,10 +373,10 @@ h2 {{ font-size:1.2rem; margin:34px 0 15px; }}
 .map-card img {{ display:block; width:100%; height:auto; }}
 .map-frame {{ position:relative; }}
 .map-image-link {{ display:block; }}
-.webcam-pin {{ position:absolute; z-index:3; transform:translate(-50%,-50%); width:28px; height:28px; display:flex; align-items:center; justify-content:center; text-decoration:none; background:#fffef4; border:2px solid #135e88; border-radius:50%; box-shadow:0 1px 4px #0008; font-size:15px; line-height:1; }}
+.webcam-pin {{ position:absolute; z-index:3; transform:translate(-50%,-50%); width:28px; height:28px; display:none; align-items:center; justify-content:center; text-decoration:none; background:#fffef4; border:2px solid #135e88; border-radius:50%; box-shadow:0 1px 4px #0008; font-size:15px; line-height:1; }}
 .webcam-pin:hover {{ background:#d5f0ff; transform:translate(-50%,-50%) scale(1.16); z-index:4; }}
 .webcam-pin:focus-visible {{ outline:3px solid #ffa400; outline-offset:2px; }}
-#panel-hybrid.hide-webcams .webcam-pin {{ display:none; }}
+#panel-hybrid.show-webcams .webcam-pin {{ display:flex; }}
 .webcam-toolbar {{ display:flex; gap:10px 20px; align-items:center; flex-wrap:wrap; margin:18px 0 10px; background:#fff; padding:12px 15px; border:1px solid #d8e2ee; border-radius:10px; }}
 .webcam-toolbar label {{ font-weight:750; cursor:pointer; }}
 .webcam-toolbar input {{ width:17px; height:17px; vertical-align:middle; accent-color:#10396c; }}
@@ -414,12 +414,13 @@ for (const tab of document.querySelectorAll('button[data-model]')) {{
 window.addEventListener('hashchange', () => selectModel(location.hash.slice(1)));
 selectModel(location.hash.slice(1));
 const webcamCheckbox = document.getElementById('toggle-hybrid-webcams');
-if (webcamCheckbox) {{
-  document.getElementById('panel-hybrid').classList.add('hide-webcams');
+const hybridPanel = document.getElementById('panel-hybrid');
+if (webcamCheckbox && hybridPanel) {{
+  // Start altijd met alle webcams verborgen, ook na browser-herstel.
+  webcamCheckbox.checked = false;
+  hybridPanel.classList.remove('show-webcams');
   webcamCheckbox.addEventListener('change', () => {{
-    document.getElementById('panel-hybrid').classList.toggle(
-      'hide-webcams', !webcamCheckbox.checked
-    );
+    hybridPanel.classList.toggle('show-webcams', webcamCheckbox.checked);
   }});
 }}
 const updated = Date.parse({json.dumps(now.isoformat())});
