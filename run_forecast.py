@@ -319,7 +319,7 @@ def make_site(errors: dict[str, str] | None = None) -> str:
             detail = f'<p class="detail">{runs}</p>' if runs else ""
             webcam_toolbar = (
                 '<div class="webcam-toolbar">'
-                '<label><input type="checkbox" id="toggle-hybrid-webcams" checked>'
+                '<label><input type="checkbox" id="toggle-hybrid-webcams">'
                 ' 📷 Toon 5 webcams op de Hybrid-kaarten</label>'
                 '<span>Klik op een camera voor de officiële livebeelden.</span>'
                 '</div>'
@@ -415,6 +415,7 @@ window.addEventListener('hashchange', () => selectModel(location.hash.slice(1)))
 selectModel(location.hash.slice(1));
 const webcamCheckbox = document.getElementById('toggle-hybrid-webcams');
 if (webcamCheckbox) {{
+  document.getElementById('panel-hybrid').classList.add('hide-webcams');
   webcamCheckbox.addEventListener('change', () => {{
     document.getElementById('panel-hybrid').classList.toggle(
       'hide-webcams', !webcamCheckbox.checked
