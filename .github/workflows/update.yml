@@ -1,7 +1,8 @@
 
 name: Update SnowHybrid + ECMWF + ICON-D2 maps (hourly)
 
-# cron-job.org starts this workflow every hour.
+# cron-job.org triggers this using POST /actions/workflows/update.yml/dispatches.
+# Keep this workflow_dispatch trigger. No duplicate GitHub schedule is needed.
 on:
   workflow_dispatch:
     inputs:
@@ -24,30 +25,34 @@ jobs:
   forecast:
     runs-on: ubuntu-24.04
     timeout-minutes: 55
-
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
 
     env:
-      # HYBRID MODEL
+      # Same dark/slate display for all three models; other options:
+      # graphite, night, ice. No impact on model calculations.
+      SNOW_MAP_THEME: 'slate'
+
+      # Hybrid: 48 h, 3-hour intervals, 6 models.
       HYBRID_GRID_STEP: '0.008'
-      HYBRID_DPI: '300'
+      HYBRID_DPI: '200'
       HYBRID_MIN_MODELS: '2'
       HYBRID_ESRI_RELIEF: '1'
 
-      # ECMWF MODEL - 7 dagen
-      ECMWF_AREAS: 'alps, full'
+      # Standalone ECMWF: 24-hour model-age limit retained; Alps only.
+      ECMWF_AREAS: 'alps'
       ECMWF_N_DAYS: '7'
       ECMWF_GRID_STEP_ALPS: '0.008'
       ECMWF_GRID_STEP_FULL: '0.016'
-      ECMWF_DPI: '300'
+      ECMWF_DPI: '200'
+      ECMWF_MAX_RUN_AGE_H: '24'
       ECMWF_ESRI_RELIEF: '1'
 
-      # ICON-D2 MODEL - 48 uur
-      # Alleen Alpen; gebruik 'alps,full' voor West-Europa erbij.
+      # Standalone ICON-D2: snowfall per local day, cumulative snowfall,
+      # snowline and freezing-level maps (6 h), up to +48 h. Alps only.
       ICON_D2_AREAS: 'alps'
-      ICON_D2_DPI: '300'
+      ICON_D2_DPI: '200'
       ICON_D2_GRID_STEP_ALPS: '0.008'
       ICON_D2_GRID_STEP_FULL: '0.012'
       ICON_D2_ESRI_RELIEF: '1'
@@ -76,6 +81,16 @@ jobs:
       - name: Check all scripts and libraries
         run: python run_forecast.py --check
 
+      - name: Verify dark map layout imports
+        run: |
+          python -m py_compile map_style_reference.py snow_dark_adapter.py
+          python - <<'PYCODE'
+          import map_style_reference as design
+          import snow_dark_adapter as adapter
+          assert design.RELIEF_THEME == 'slate'
+          print('Dark/slate map layout installed for all model panels')
+          PYCODE
+
       - name: Generate Hybrid, ECMWF and ICON-D2 maps and website
         if: inputs.check_only != true
         run: python run_forecast.py
@@ -86,27 +101,19 @@ jobs:
           python - <<'PY'
           import json
           from pathlib import Path
-
           p = Path('site/status.json')
           if not p.is_file():
               raise SystemExit('No website status.json was generated')
-
           status = json.loads(p.read_text(encoding='utf-8'))
-
           for model in ('hybrid', 'ecmwf', 'icon_d2'):
               entry = status['models'][model]
               print(f"{model}: {entry['status']}, {entry['map_count']} maps")
-
           for model in ('hybrid', 'ecmwf'):
               if status['models'][model]['status'] != 'ok':
-                  raise SystemExit(
-                      f'Existing {model} forecast failed; preserving previous website'
-                  )
-
+                  raise SystemExit(f'Existing {model} forecast failed; preserving previous website')
           if status['models']['icon_d2']['status'] != 'ok':
               print('::warning::ICON-D2 failed; only Hybrid and ECMWF will be updated')
           PY
-
           du -sh site
 
       - name: Configure Pages
