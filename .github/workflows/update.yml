@@ -1,5 +1,5 @@
 
-name: Update SnowHybrid + ECMWF + ICON-D2 maps (hourly)
+name: Update SnowHybrid + ECMWF + ICON-D2 + ICON-CH2 maps (hourly)
 
 # cron-job.org triggers this using POST /actions/workflows/update.yml/dispatches.
 # Keep this workflow_dispatch trigger. No duplicate GitHub schedule is needed.
@@ -18,19 +18,19 @@ permissions:
   id-token: write
 
 concurrency:
-  group: snowhybrid-ecmwf-icon-d2-pages-v4
+  group: snowhybrid-ecmwf-icon-d2-icon-ch2-pages-v5
   cancel-in-progress: false
 
 jobs:
   forecast:
     runs-on: ubuntu-24.04
-    timeout-minutes: 55
+    timeout-minutes: 65
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
 
     env:
-      # Same dark/slate display for all three models; other options:
+      # Same dark/slate display for all four models; other options:
       # graphite, night, ice. No impact on model calculations.
       SNOW_MAP_THEME: 'slate'
 
@@ -57,6 +57,15 @@ jobs:
       ICON_D2_GRID_STEP_FULL: '0.012'
       ICON_D2_ESRI_RELIEF: '1'
       ICON_D2_MAX_RUN_AGE_H: '24'
+
+      # Standalone MeteoSwiss ICON-CH2-EPS control-run, Alps, 5 days.
+      # Only 24-hour snowfall and cumulative maps (9 PNGs).
+      ICON_CH2_DAYS: '5'   # change to '4' for 4 daily + 3 cumulative
+      ICON_CH2_STEP_HOURS: '6'  # 3 is more precise but downloads twice as many fields
+      ICON_CH2_GRID_STEP_ALPS: '0.012'
+      ICON_CH2_DPI: '200'
+      ICON_CH2_MAX_RUN_AGE_H: '24'
+      ICON_CH2_ESRI_RELIEF: '1'
 
     steps:
       - name: Checkout
@@ -91,7 +100,7 @@ jobs:
           print('Dark/slate map layout installed for all model panels')
           PYCODE
 
-      - name: Generate Hybrid, ECMWF and ICON-D2 maps and website
+      - name: Generate Hybrid, ECMWF, ICON-D2 and ICON-CH2 maps and website
         if: inputs.check_only != true
         run: python run_forecast.py
 
@@ -105,7 +114,7 @@ jobs:
           if not p.is_file():
               raise SystemExit('No website status.json was generated')
           status = json.loads(p.read_text(encoding='utf-8'))
-          for model in ('hybrid', 'ecmwf', 'icon_d2'):
+          for model in ('hybrid', 'ecmwf', 'icon_d2', 'icon_ch2'):
               entry = status['models'][model]
               print(f"{model}: {entry['status']}, {entry['map_count']} maps")
           for model in ('hybrid', 'ecmwf'):
@@ -113,6 +122,8 @@ jobs:
                   raise SystemExit(f'Existing {model} forecast failed; preserving previous website')
           if status['models']['icon_d2']['status'] != 'ok':
               print('::warning::ICON-D2 failed; only Hybrid and ECMWF will be updated')
+          if status['models']['icon_ch2']['status'] != 'ok':
+              print('::warning::ICON-CH2 failed; existing model tabs remain available')
           PY
           du -sh site
 
