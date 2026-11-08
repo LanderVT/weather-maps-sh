@@ -1,19 +1,17 @@
 
-"""ICON-D2 temperature maps at 1500, 2000 and 3000 m.
+"""ICON-D2 temperature at 1500, 2000 and 3000 m a.s.l. for Sneeuwhoogte.nl.
 
-Standalone add-on to run_icon_d2.py.
+Standalone add-on to run_icon_d2.py, not a replacement for SnowAll_ICON-D2.py.
+Uses T and FI at 850/700 hPa (4 GRIB files per forecast step),
+interpolated/extrapolated to the requested heights using pressure-level
+geopotential heights.
 
-Uses T and FI at 850 and 700 hPa.
-All three heights share the same four GRIB downloads per forecast step.
+For each grid cell, T(h) is approximated by a straight line between the
+two pressure levels. This is not a full model-level interpolation.
+Areas below the model surface are masked.
 
-Forecast hours: 0, 6, 12, ..., 48.
-
-Map style:
-- Original blue/yellow temperature colours
-- 25 equal discrete classes of 2 degrees Celsius
-- Regularly spaced colourbar labels
-- Subtle hatched grey mountain mask
-- Dark/slate Sneeuwhoogte.nl layout
+Forecast hours: +0, +6, ..., +48.
+Map style: dark/slate, discrete temperature classes.
 """
 
 from __future__ import annotations
@@ -37,20 +35,17 @@ GRAVITY = 9.80665
 HEIGHTS_M = (1500, 2000, 3000)
 PRESSURE_LEVELS = (850, 700)
 
-# IMPORTANT: equal 2-degree classes.
-# 26 boundaries produce 25 equally sized colour blocks.
+# 25 discrete classes, each exactly 2 degrees wide.
 TEMP_LEVELS_C = np.arange(-30, 22, 2, dtype=float)
 
-# Labels every 5 degrees, as in the preferred legend.
+# Keep the preferred legend with labels every 5 degrees.
 TEMP_TICKS_C = list(range(-30, 21, 5))
 
-# Preserve approved transparency.
+# Approved transparency.
 TEMP_ALPHA = 0.91
 
-# Mountain mask.
+# Mountain masking and hatching.
 MASK_GRAY = "#c8cdd3"
-
-# Subtle diagonal hatch above the selected elevation.
 HATCH_PATTERN = "///"
 HATCH_COLOR = (0.23, 0.29, 0.37, 0.52)
 HATCH_WIDTH = 0.65
@@ -61,34 +56,21 @@ HATCH_WIDTH = 0.65
 # ============================================================
 
 def pressure_level_url(
-    mod,
-    run: datetime,
-    lead: int,
-    level: int,
-    parameter: str,
+    mod, run: datetime, lead: int, level: int, parameter: str
 ):
-    """Construct DWD pressure-level GRIB URL."""
+    """Construct the DWD ICON-D2 pressure-level GRIB URL."""
 
-    if level not in PRESSURE_LEVELS:
+    if level not in PRESSURE_LEVELS or parameter not in ("t", "fi"):
         raise ValueError(
-            f"Unsupported pressure level: {level}"
-        )
-
-    if parameter not in ("t", "fi"):
-        raise ValueError(
-            f"Unsupported parameter: {parameter}"
+            f"Unsupported pressure-level field {parameter}/{level}"
         )
 
     filename = (
         "icon-d2_germany_regular-lat-lon_pressure-level_"
-        f"{run:%Y%m%d%H}_{lead:03d}_"
-        f"{level}_{parameter}.grib2.bz2"
+        f"{run:%Y%m%d%H}_{lead:03d}_{level}_{parameter}.grib2.bz2"
     )
 
-    url = (
-        f"{mod.DATA_URL}/{run:%H}/"
-        f"{parameter}/{filename}"
-    )
+    url = f"{mod.DATA_URL}/{run:%H}/{parameter}/{filename}"
 
     return url, filename
 
@@ -104,20 +86,13 @@ def kelvin_to_celsius(raw, unit: str):
     unit = unit.strip().lower()
 
     if unit in (
-        "k",
-        "kelvin",
-        "degrees kelvin",
-        "degree kelvin",
+        "k", "kelvin", "degrees kelvin", "degree kelvin"
     ):
         data = data - 273.15
 
     elif unit in (
-        "c",
-        "degc",
-        "degree celsius",
-        "degrees celsius",
-        "celsius",
-        "°c",
+        "c", "degc", "degree celsius",
+        "degrees celsius", "celsius", "°c"
     ):
         pass
 
@@ -127,14 +102,14 @@ def kelvin_to_celsius(raw, unit: str):
 
     else:
         raise ValueError(
-            f"Unexpected temperature unit: {unit!r}"
+            f"Unexpected DWD temperature unit: {unit!r}"
         )
 
     return data
 
 
 def geopotential_to_metres(raw, unit: str):
-    """Convert geopotential into height in metres."""
+    """Convert geopotential to geopotential height in metres."""
 
     data = np.asarray(raw, dtype=float)
 
@@ -142,28 +117,20 @@ def geopotential_to_metres(raw, unit: str):
     unit = unit.replace("²", "2").replace("−", "-")
 
     if unit in (
-        "m",
-        "gpm",
-        "geopotentialmetre",
-        "geopotentialmeter",
+        "m", "gpm", "geopotentialmetre", "geopotentialmeter"
     ):
         return data
 
     if unit in (
-        "m**2s**-2",
-        "m2s-2",
-        "m2/s2",
-        "m^2s^-2",
-        "m**2s-2",
+        "m**2s**-2", "m2s-2", "m2/s2",
+        "m^2s^-2", "m**2s-2"
     ):
         return data / GRAVITY
 
     finite = data[np.isfinite(data)]
 
     if finite.size == 0:
-        raise ValueError(
-            "All geopotential values are missing"
-        )
+        raise ValueError("All geopotential values are missing")
 
     typical = float(np.median(finite))
 
@@ -174,13 +141,12 @@ def geopotential_to_metres(raw, unit: str):
         return data
 
     raise ValueError(
-        f"Cannot interpret FI units {unit!r}; "
-        f"median={typical:g}"
+        f"Cannot interpret FI units {unit!r}; median={typical:g}"
     )
 
 
 # ============================================================
-# 4. TEMPERATURE INTERPOLATION
+# 4. VERTICAL TEMPERATURE INTERPOLATION
 # ============================================================
 
 def calculate_fixed_height_temperature(
@@ -191,13 +157,12 @@ def calculate_fixed_height_temperature(
     target_m: int,
     hsurf_m,
 ):
-    """Interpolate temperature between 850 and 700 hPa.
+    """Interpolate temperatures between 850 and 700 hPa.
 
-    The same vertical profile is used for 1500, 2000
-    and 3000 metres.
+    The same pressure-level data provide temperatures at
+    1500, 2000 and 3000 metres.
 
     Small extrapolations are allowed.
-
     Temperatures below model terrain are masked.
     """
 
@@ -212,10 +177,7 @@ def calculate_fixed_height_temperature(
     if not all(
         a.shape == t850_c.shape
         for a in (
-            t700_c,
-            z850_m,
-            z700_m,
-            hsurf_m,
+            t700_c, z850_m, z700_m, hsurf_m
         )
     ):
         raise ValueError(
@@ -268,78 +230,65 @@ def calculate_fixed_height_temperature(
 
 
 # ============================================================
-# 5. DISCRETE TEMPERATURE COLOURS
+# 5. TEMPERATURE COLOURS
 # ============================================================
 
 def temperature_colormap():
-    """Original blue/yellow palette with equal 2 C classes.
+    """25 discrete classes with stronger cold and warm contrasts.
 
-    Exactly 25 colour blocks.
+    Cold side:
+      Deep violet -> purple -> blue -> light blue
 
-    The two classes around freezing:
-      -2 to 0 C: light blue
-       0 to 2 C: warm yellow
+    Near freezing:
+      Clearly separated blue and yellow classes
 
-    No extra narrow class around zero.
+    Warm side:
+      Yellow -> orange -> red -> dark red
+
+    All class widths remain exactly 2 degrees Celsius.
     """
 
-    # Original first-version colour anchors.
-    anchors = [
-        (0.00, "#311d62"),   # Deep violet
-        (0.15, "#2a4caa"),   # Royal blue
-        (0.30, "#237fc3"),   # Blue
-        (0.45, "#74c5ed"),   # Light blue
-        (0.53, "#9dd8f4"),   # Icy blue
-        (0.58, "#76bde8"),   # Cool blue
-        (0.625, "#f0f1eb"),  # Neutral transition
-        (0.66, "#ffe28b"),   # Yellow
-        (0.73, "#ffd17b"),   # Golden yellow
-        (0.86, "#f7a04f"),   # Orange
-        (1.00, "#d73b43"),   # Red
-    ]
-
-    # Continuous original palette used only to obtain
-    # colours at the CENTRE of each discrete class.
-    base = mcolors.LinearSegmentedColormap.from_list(
-        "original_temperature_palette",
-        anchors,
-        N=1024,
-    )
-
-    # Equal-width intervals:
-    # -30..-28, -28..-26, ... 18..20.
-    centres = (
-        TEMP_LEVELS_C[:-1] + TEMP_LEVELS_C[1:]
-    ) / 2.0
-
+    # Exactly 25 colours for 25 temperature intervals.
     colors = [
-        mcolors.to_hex(
-            base((t + 30.0) / 50.0)
-        )
-        for t in centres
+        "#37105d",  # -30 to -28: dark violet
+        "#501574",  # -28 to -26
+        "#63198b",  # -26 to -24
+        "#7022a2",  # -24 to -22
+        "#6c2fb4",  # -22 to -20
+        "#5f3fc4",  # -20 to -18
+        "#514dcc",  # -18 to -16
+        "#405dd1",  # -16 to -14: purple-blue
+        "#346cd6",  # -14 to -12
+        "#2a78d8",  # -12 to -10
+        "#2585d9",  # -10 to -8
+        "#258fdc",  #  -8 to -6
+
+        # More contrast between the blue classes near 0 C.
+        "#3b9fdd",  #  -6 to -4: medium blue
+        "#75bce9",  #  -4 to -2: sky blue
+        "#b2dcf3",  #  -2 to  0: light icy blue
+
+        # Faster transition from yellow towards red.
+        "#ffe39a",  #   0 to  2: yellow
+        "#ffda70",  #   2 to  4: golden yellow
+        "#ffc653",  #   4 to  6
+        "#f9ab42",  #   6 to  8: orange
+        "#f28b37",  #   8 to 10
+        "#e96c32",  #  10 to 12: orange-red
+        "#dc4f33",  #  12 to 14: red
+        "#c93833",  #  14 to 16
+        "#a82437",  #  16 to 18: dark red
+        "#80163b",  #  18 to 20: deepest red
     ]
 
-    # Slightly clearer colours either side of freezing.
-    # One blue class, immediately followed by one yellow class.
-    index_cold = int(
-        np.flatnonzero(
-            np.isclose(centres, -1.0)
-        )[0]
-    )
+    if len(colors) != len(TEMP_LEVELS_C) - 1:
+        raise ValueError(
+            "Number of temperature colours does not match classes"
+        )
 
-    index_warm = int(
-        np.flatnonzero(
-            np.isclose(centres, 1.0)
-        )[0]
-    )
-
-    colors[index_cold] = "#b8ddf3"
-    colors[index_warm] = "#ffe9b0"
-
-    # Discrete colormap: exactly 25 colours.
     cmap = mcolors.ListedColormap(
         colors,
-        name="icon_d2_temperature_discrete_2c",
+        name="icon_d2_temperature_bold_discrete_2c",
     )
 
     cmap.set_bad((0, 0, 0, 0))
@@ -355,7 +304,7 @@ def temperature_colormap():
 
 
 # ============================================================
-# 6. TEMPERATURE MAP PLOTTING
+# 6. MAP PLOTTING
 # ============================================================
 
 def render_temperature_map(
@@ -370,7 +319,7 @@ def render_temperature_map(
     lead,
     target_m,
 ):
-    """Render discrete temperature classes and hatched terrain."""
+    """Render discrete temperature classes on dark terrain."""
 
     fig, ax, proj = style.dark_axes(extent)
 
@@ -378,10 +327,7 @@ def render_temperature_map(
 
     values = np.ma.masked_invalid(field_c)
 
-    # --------------------------------------------------------
-    # DISCRETE TEMPERATURE CLASSES
-    # --------------------------------------------------------
-
+    # Temperature classes.
     ax.contourf(
         x,
         y,
@@ -397,18 +343,8 @@ def render_temperature_map(
     )
 
     # --------------------------------------------------------
-    # GREY MOUNTAIN MASK WITH DIAGONAL HATCHING
+    # GREY MOUNTAIN MASK AND DIAGONAL HATCHING
     # --------------------------------------------------------
-
-    # These are places where model terrain exceeds
-    # the selected temperature altitude.
-    #
-    # Example:
-    # On a 1500 m temperature map, terrain above 1500 m
-    # is shown grey with diagonal stripes.
-    #
-    # This makes grey areas distinguishable from
-    # the light-blue temperature classes.
 
     above_terrain = np.asarray(
         terrain_mask,
@@ -419,7 +355,7 @@ def render_temperature_map(
 
         mask_field = above_terrain.astype(float)
 
-        # Base grey mountain fill.
+        # Light-grey base.
         ax.contourf(
             x,
             y,
@@ -431,7 +367,7 @@ def render_temperature_map(
             antialiased=False,
         )
 
-        # Subtle diagonal hatch overlay.
+        # Diagonal hatching.
         with plt.rc_context({
             "hatch.linewidth": HATCH_WIDTH,
         }):
@@ -448,7 +384,7 @@ def render_temperature_map(
                 antialiased=False,
             )
 
-        # Support different Matplotlib versions.
+        # Compatible with different Matplotlib versions.
         if hasattr(hatch, "set_edgecolor"):
 
             hatch.set_edgecolor(HATCH_COLOR)
@@ -458,10 +394,7 @@ def render_temperature_map(
 
             for collection in hatch.collections:
 
-                collection.set_edgecolor(
-                    HATCH_COLOR
-                )
-
+                collection.set_edgecolor(HATCH_COLOR)
                 collection.set_linewidth(0.0)
 
     # --------------------------------------------------------
@@ -469,10 +402,7 @@ def render_temperature_map(
     # --------------------------------------------------------
 
     valid_utc = run + timedelta(hours=lead)
-
-    valid_local = valid_utc.astimezone(
-        mod.LOCAL_TZ
-    )
+    valid_local = valid_utc.astimezone(mod.LOCAL_TZ)
 
     # --------------------------------------------------------
     # OUTPUT FILENAME
@@ -486,14 +416,13 @@ def render_temperature_map(
     )
 
     # --------------------------------------------------------
-    # DARK HEADER, FOOTER AND REGULAR COLOURBAR
+    # DARK HEADER, FOOTER AND REGULAR LEGEND
     # --------------------------------------------------------
 
     style.finish_map_dark(
         fig,
         ax,
-        f"Temperatuur {target_m} m – "
-        f"{style.region_title(area)}",
+        f"Temperatuur {target_m} m – {style.region_title(area)}",
         "",
         style.fmt_long(valid_local),
         "Temperatuur (°C)",
@@ -511,32 +440,22 @@ def render_temperature_map(
 
 
 # ============================================================
-# 7. DOWNLOAD DATA AND GENERATE ALL TEMPERATURE MAPS
+# 7. DOWNLOAD DATA AND GENERATE TEMPERATURE MAPS
 # ============================================================
 
 def produce_temperature_maps(mod, run, areas, extents):
-    """Generate 1500, 2000 and 3000 m temperature maps.
-
-    All three heights use the same four fields per step:
-      T850
-      T700
-      FI850
-      FI700
-
-    Forecast steps: 0, 6, ..., 48 h.
-    """
+    """Generate 1500, 2000 and 3000 m maps from shared DWD data."""
 
     steps = tuple(mod.FORECAST_HOURS)
 
     if steps != tuple(range(0, 49, 6)):
         raise ValueError(
-            "ICON-D2 temperature expects "
-            "steps 0..48 every 6 hours"
+            "ICON-D2 temperature expects steps 0..48 every 6 hours"
         )
 
     if any(a not in extents for a in areas):
         raise ValueError(
-            "No recorded ICON-D2 map extent for: "
+            f"No recorded ICON-D2 map extent for: "
             f"{set(areas) - set(extents)}"
         )
 
@@ -545,18 +464,11 @@ def produce_temperature_maps(mod, run, areas, extents):
     with requests.Session() as session:
 
         session.headers.update({
-            "User-Agent":
-                "SneeuwhoogteNL-ICON-D2-temperature/1.0",
+            "User-Agent": "SneeuwhoogteNL-ICON-D2-temperature/1.0",
         })
 
-        # ----------------------------------------------------
-        # SURFACE ELEVATION
-        # ----------------------------------------------------
-
-        hfield = mod.load_hsurf(
-            session,
-            run,
-        )
+        # Reuse surface height from existing model cache.
+        hfield = mod.load_hsurf(session, run)
 
         xsurf, ysurf, terrain_raw, terrain_unit = hfield
 
@@ -578,19 +490,13 @@ def produce_temperature_maps(mod, run, areas, extents):
             terrain,
         )
 
-        # ----------------------------------------------------
-        # FORECAST STEPS
-        # ----------------------------------------------------
-
+        # Loop over forecast times.
         for lead in steps:
 
             data = {}
             grid = None
 
-            # -----------------------------------------------
-            # DOWNLOAD FOUR PRESSURE-LEVEL FIELDS
-            # -----------------------------------------------
-
+            # Four pressure-level GRIB fields per forecast time.
             for level in PRESSURE_LEVELS:
 
                 for param in ("t", "fi"):
@@ -612,12 +518,7 @@ def produce_temperature_maps(mod, run, areas, extents):
                     names = (
                         ["t", "temperature"]
                         if param == "t"
-                        else [
-                            "fi",
-                            "z",
-                            "gh",
-                            "geopotential",
-                        ]
+                        else ["fi", "z", "gh", "geopotential"]
                     )
 
                     result = mod.read_grib(
@@ -648,12 +549,9 @@ def produce_temperature_maps(mod, run, areas, extents):
 
                     data[(param, level)] = result
 
-            # -----------------------------------------------
-            # CONVERT TEMPERATURE AND GEOPOTENTIAL
-            # -----------------------------------------------
-
             x, y = grid
 
+            # Convert DWD temperature and geopotential fields.
             t850 = kelvin_to_celsius(
                 data[("t", 850)][2],
                 data[("t", 850)][3],
@@ -674,38 +572,29 @@ def produce_temperature_maps(mod, run, areas, extents):
                 data[("fi", 700)][3],
             )
 
-            # -----------------------------------------------
-            # GENERATE ALL THREE TEMPERATURE HEIGHTS
-            # -----------------------------------------------
-
+            # Generate all three heights from the same fields.
             for target_m in HEIGHTS_M:
 
-                field_c, mask = (
-                    calculate_fixed_height_temperature(
-                        t850,
-                        t700,
-                        z850,
-                        z700,
-                        target_m,
-                        terrain,
-                    )
+                field_c, mask = calculate_fixed_height_temperature(
+                    t850,
+                    t700,
+                    z850,
+                    z700,
+                    target_m,
+                    terrain,
                 )
 
-                coverage = np.isfinite(
-                    field_c
-                ).sum()
+                coverage = np.isfinite(field_c).sum()
 
                 if coverage < 500:
                     raise RuntimeError(
                         f"T {target_m} m +{lead}: "
-                        "insufficient valid cells "
-                        f"({coverage})"
+                        f"insufficient valid cells ({coverage})"
                     )
 
                 print(
                     f"ICON-D2 T {target_m} m "
-                    f"+{lead:03d}: "
-                    f"{coverage} valid cells",
+                    f"+{lead:03d}: {coverage} valid cells",
                     flush=True,
                 )
 
