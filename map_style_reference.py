@@ -1045,6 +1045,8 @@ def footer_source_text(filepath, run):
     filename = Path(filepath).name.lower() if filepath is not None else ""
     if filename.startswith("ecmwf_"):
         return f"ECMWF - run {run:%d-%m-%Y %H} UTC"
+    if filename.startswith("icon_ch2_"):
+        return f"ICON-CH2 (MeteoSwiss) - run {run:%d-%m-%Y %H} UTC"
     if filename.startswith("icon_d2_"):
         return f"ICON-D2 (DWD) - run {run:%d-%m-%Y %H} UTC"
     if filename.startswith("hybrid_"):

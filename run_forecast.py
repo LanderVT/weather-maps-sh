@@ -1,4 +1,4 @@
-"""Cloud runner: fresh Hybrid + ECMWF + ICON-D2 forecasts -> GitHub Pages.
+"""Cloud runner: Hybrid + ECMWF + ICON-D2 + ICON-CH2 -> GitHub Pages.
 
 Runs the original science scripts in an isolated HOME, never uploads GRIB/NetCDF
 or intermediate arrays. Every publish is a new self-contained website; there is
@@ -28,10 +28,12 @@ SOURCES = (
     "SnowDays_ICON-CH1.py", "SnowDays_ICON-CH2.py",
     "SnowDays_ICON-D2.py", "SnowDays_ECMWF.py", "run_ecmwf.py",
     "SnowAll_ICON-D2.py", "run_icon_d2.py", "icon_d2_temperature.py",
+    "run_icon_ch2.py",
 )
-MODELS = ("hybrid", "ecmwf", "icon_d2")
+MODELS = ("hybrid", "ecmwf", "icon_d2", "icon_ch2")
 MODEL_NAMES = {
-    "hybrid": "Hybrid Model", "ecmwf": "ECMWF Model", "icon_d2": "ICON-D2 Model"
+    "hybrid": "Hybrid Model", "ecmwf": "ECMWF Model",
+    "icon_d2": "ICON-D2 Model", "icon_ch2": "ICON-CH2 Model"
 }
 # Five official Alpine webcam pages. These are regular links, not live embeds,
 # so the images remain lightweight and the website requires no third-party JS.
@@ -237,7 +239,7 @@ def collect_models(errors: dict[str, str]) -> dict[str, dict]:
 
 
 def make_site(errors: dict[str, str] | None = None) -> str:
-    """Publish three independent model tabs (or explicit error panels)."""
+    """Publish four independent model tabs (or explicit error panels)."""
     errors = errors or {}
     results = collect_models(errors)
     if SITE.exists():
@@ -319,10 +321,15 @@ def make_site(errors: dict[str, str] | None = None) -> str:
             elif model == "ecmwf":
                 regions = ", ".join("Alpen" if a == "alps" else "West-Europa" for a in meta.get("areas", []))
                 intro = f"{escape(str(meta.get('days', 7)))} dagen · {regions} · {len(result['images'])} kaarten"
-            else:
+            elif model == "icon_d2":
                 regions = ", ".join("Alpen" if a == "alps" else "West-Europa" for a in meta.get("areas", []))
                 intro = (f"ICON-D2 · 48 uur · {regions} · {len(result['images'])} kaarten "
                          f"· sneeuw- en vorstgrens om de 6 uur")
+            elif model == "icon_ch2":
+                intro = (f"ICON-CH2 · {meta.get('days', 5)} dagen · Alpen "
+                         f"· {len(result['images'])} kaarten · 24-uurs sneeuwval en cumulatief")
+            else:
+                intro = MODEL_NAMES[model]
             detail = f'<p class="detail">{runs}</p>' if runs else ""
             webcam_toolbar = (
                 '<div class="webcam-toolbar">'
@@ -354,7 +361,7 @@ def make_site(errors: dict[str, str] | None = None) -> str:
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-<title>Sneeuwhoogte · Hybrid, ECMWF & ICON-D2</title>
+<title>Sneeuwhoogte · Hybrid, ECMWF, ICON-D2 & ICON-CH2</title>
 <style>
 :root {{ color-scheme:light; font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; }}
 * {{ box-sizing:border-box; }}
@@ -395,21 +402,22 @@ footer {{ max-width:1240px; margin:0 auto; color:#65758b; padding:0 18px 28px; f
 </head>
 <body>
 <header><h1>Sneeuwverwachting Alpen</h1>
-<p>Hybride voorspelling, ECMWF en ICON-D2 als afzonderlijke modellen</p>
+<p>Hybride voorspelling, ECMWF, ICON-D2 en ICON-CH2 als afzonderlijke modellen</p>
 <p>Laatst verwerkt: {now_str}</p></header>
 <main>
 <nav class="tabs" role="tablist" aria-label="Kies het weermodel">
 <button type="button" id="tab-hybrid" class="tab" role="tab" aria-controls="panel-hybrid" aria-selected="true" data-model="hybrid">Hybrid Model</button>
 <button type="button" id="tab-ecmwf" class="tab" role="tab" aria-controls="panel-ecmwf" aria-selected="false" data-model="ecmwf">ECMWF Model</button>
 <button type="button" id="tab-icon_d2" class="tab" role="tab" aria-controls="panel-icon_d2" aria-selected="false" data-model="icon_d2">ICON-D2 Model</button>
+<button type="button" id="tab-icon_ch2" class="tab" role="tab" aria-controls="panel-icon_ch2" aria-selected="false" data-model="icon_ch2">ICON-CH2 Model</button>
 </nav>
 {''.join(panels)}
 </main>
 <footer>Experimentele sneeuwverwachting, geen officiële waarschuwing. Bronnen: Météo-France, GeoSphere Austria, MeteoSwiss, DWD en ECMWF. Controleer de modelrun en het actualiteitstijdstip.</footer>
 <script>
 function selectModel(model) {{
-  if (!['hybrid','ecmwf','icon_d2'].includes(model)) model='hybrid';
-  for (const key of ['hybrid','ecmwf','icon_d2']) {{
+  if (!['hybrid','ecmwf','icon_d2','icon_ch2'].includes(model)) model='hybrid';
+  for (const key of ['hybrid','ecmwf','icon_d2','icon_ch2']) {{
     document.getElementById('panel-'+key).hidden = key !== model;
     document.getElementById('tab-'+key).setAttribute('aria-selected', String(key === model));
   }}
@@ -475,7 +483,7 @@ def check_sources() -> None:
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         print(f"  Model script OK: {path.name}", flush=True)
-    for path in (ROOT / "SnowAll_ICON-D2.py", ROOT / "run_icon_d2.py"):
+    for path in (ROOT / "SnowAll_ICON-D2.py", ROOT / "run_icon_d2.py", ROOT / "run_icon_ch2.py"):
         spec = importlib.util.spec_from_file_location("check_" + path.stem.replace("-", "_"), path)
         if spec is None or spec.loader is None:
             raise RuntimeError("Cannot import " + path.name)
@@ -501,7 +509,7 @@ def main() -> None:
         shutil.rmtree(WORK)
     if SITE.exists():
         shutil.rmtree(SITE)
-    for folder in (MAPS / "hybrid", MAPS / "ecmwf", MAPS / "icon_d2", WORK / "home", WORK / "tmp", WORK / "matplotlib"):
+    for folder in (MAPS / "hybrid", MAPS / "ecmwf", MAPS / "icon_d2", MAPS / "icon_ch2", WORK / "home", WORK / "tmp", WORK / "matplotlib"):
         folder.mkdir(parents=True, exist_ok=True)
     errors: dict[str, str] = {}
     try:
@@ -515,10 +523,12 @@ def main() -> None:
             "HYBRID_OUTPUT_DIR": str(MAPS / "hybrid"),
             "ECMWF_OUTPUT_DIR": str(MAPS / "ecmwf"),
             "ICON_D2_OUTPUT_DIR": str(MAPS / "icon_d2"),
+            "ICON_CH2_OUTPUT_DIR": str(MAPS / "icon_ch2"),
             "PYTHONUNBUFFERED": "1",
             "MPLBACKEND": "Agg",
         })
-        for model, script in (("hybrid", "SnowHybrid.py"), ("ecmwf", "run_ecmwf.py"), ("icon_d2", "run_icon_d2.py")):
+        for model, script in (("hybrid", "SnowHybrid.py"), ("ecmwf", "run_ecmwf.py"),
+                              ("icon_d2", "run_icon_d2.py"), ("icon_ch2", "run_icon_ch2.py")):
             print(f"\n=== RUNNING {MODEL_NAMES[model]} ===", flush=True)
             try:
                 subprocess.run([sys.executable, str(ROOT / script)], cwd=ROOT, env=env, check=True)
