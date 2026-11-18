@@ -106,7 +106,7 @@ ESRI_ZOOM = 9
 DPI = 400
 
 LOCAL_TZ = ZoneInfo("Europe/Brussels")
-MAX_RUN_AGE_H = 12
+MAX_RUN_AGE_H = 24
 
 CITY_FONT = {"full": 7.5, "alps": 8.0}
 MAX_CITY_LABELS = {"full": 45, "alps": 38}
