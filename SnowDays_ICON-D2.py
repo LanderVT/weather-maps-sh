@@ -8,8 +8,8 @@ regelmatig 0.02-gradenrooster van DWD) als invoer, tot +48 uur:
 1. Neerslag (TOT_PREC) per STEP_HOURS, bilineair naar het DEM-rooster.
 2. Neerslag-hoogtegradient t.o.v. glad terrein (massabehoudend).
 3. Sneeuwvalgrens: SNOWLMT van ICON-D2 zelf (natteboltemperatuur
-   +1.3 graden); lege cellen (grens op/onder het terrein) worden
-   ingevuld met de modelterreinhoogte.
+   +1.3 graden); cellen zonder SNOWLMT (te koude kolom) krijgen een
+   geextrapoleerde grens uit T_2M, RELHUM_2M en HSURF.
 4. Op elke DEM-pixel sneeuw boven de grens, regen eronder
    (overgang van +/- SNOW_BAND_M meter).
 5. Temperatuur per pixel uit T_2M en het modelterrein (HSURF) met een
@@ -321,7 +321,7 @@ def remote_exists(session, url, retries=4):
 
 
 def newest_run(session):
-    """Nieuwste run met +MAX_LEAD voor neerslag, sneeuwgrens en T_2M."""
+    """Nieuwste run met +MAX_LEAD voor neerslag, sneeuwgrens, T en RV."""
 
     now = datetime.now(timezone.utc)
 
@@ -341,7 +341,7 @@ def newest_run(session):
 
             if all(
                 remote_exists(session, dwd_url(run, MAX_LEAD, par)[0])
-                for par in ("tot_prec", "snowlmt", "t_2m")
+                for par in ("tot_prec", "snowlmt", "t_2m", "relhum_2m")
             ):
 
                 print(f"{MODEL_LABEL}-run: {run:%Y-%m-%d %H:%M} UTC")
@@ -431,6 +431,19 @@ def load_field(session, run, lead, parameter, box):
     url, name = dwd_url(run, lead, parameter)
 
     return read_field(download_archive(session, url, name), box)
+
+
+def wet_bulb(t_c, rh):
+    """Stull (2011) benadering van natteboltemperatuur in graden C."""
+
+    rh = np.clip(rh, 1.0, 100.0)
+    return (
+        t_c * np.arctan(0.151977 * np.sqrt(rh + 8.313659))
+        + np.arctan(t_c + rh)
+        - np.arctan(rh - 1.676331)
+        + 0.00391838 * rh ** 1.5 * np.arctan(0.023101 * rh)
+        - 4.686035
+    )
 
 
 def load_hsurf(session, run, box):
@@ -609,7 +622,7 @@ def precip_factor(dem):
         (1 + a) / np.maximum(1 - a, 1e-3), *PRECIP_FACTOR_RANGE
     )
 
-    # Massabehoud: gemiddeld 1 over ~25 km.
+    # Benaderend massabehoud op de gekozen gladmaakschaal.
     factor = factor / np.maximum(
         gaussian_filter(factor, sigma, mode="nearest"), 1e-3
     )
@@ -1364,8 +1377,13 @@ def iterate_steps(session, run, steps, area):
     box = [w - 0.05, e + 0.05, s - 0.05, n + 0.05]
 
     xf, yf, dem = load_dem(session, extent)
+    print(f"Doelrooster: {len(xf)} x {len(yf)} punten, stap {GRID_STEP} graden")
 
     x, y, orog = load_hsurf(session, run, box)
+    print(
+        f"ICON invoerrooster: ongeveer {np.median(np.diff(x)):.4f} graden lon "
+        f"x {np.median(np.diff(y)):.4f} graden lat"
+    )
     interp = GridInterp(x, y, xf, yf)
     hsurf = interp(orog)
 
@@ -1382,7 +1400,7 @@ def iterate_steps(session, run, steps, area):
 
         fields = {}
 
-        for par in ("tot_prec", "snowlmt", "t_2m"):
+        for par in ("tot_prec", "snowlmt", "t_2m", "relhum_2m"):
 
             xs, ys, fields[par] = load_field(
                 session, run, step, par, box
@@ -1391,16 +1409,35 @@ def iterate_steps(session, run, steps, area):
             if not (np.array_equal(xs, x) and np.array_equal(ys, y)):
                 raise ValueError(f"Rooster van {par} +{step:03d} wijkt af")
 
-        # Lege SNOWLMT = grens op/onder het modelterrein.
-        line = fields["snowlmt"]
-        line = np.where(
-            np.isfinite(line) & (line >= -100) & (line <= 8000),
-            line, orog
+        # DWD: SNOWLMT ontbreekt wanneer de natteboltemperatuur nergens in
+        # de luchtkolom de drempel van +1.3 C overschrijdt (dus: koud genoeg
+        # tot aan het modelterrein). Een ontbrekende grens is NIET gelijk
+        # aan HSURF: dat zou op modelterreinhoogte slechts 50% sneeuw geven.
+        # Extrapoleer de grens onder het modelterrein met de 2m-nattebol-T.
+        line_native = fields["snowlmt"]
+        valid = (
+            np.isfinite(line_native)
+            & (line_native >= -100)
+            & (line_native <= 8000)
         )
+        tw_2m = wet_bulb(
+            fields["t_2m"] - 273.15,
+            fields["relhum_2m"]
+        )
+        below_surface = orog + (tw_2m - SNOW_TW) / TW_LAPSE
+        line_native = np.where(valid, line_native, below_surface)
+
+        n_missing = int(np.count_nonzero(~valid & np.isfinite(orog)))
+        n_land = int(np.count_nonzero(np.isfinite(orog)))
+        if n_missing:
+            print(
+                f"  +{step:03d} uur: {n_missing / max(n_land, 1):.1%} "
+                "SNOWLMT ontbreekt, ingevuld via natteboltemperatuur"
+            )
 
         cur = {
             "tp": np.nan_to_num(interp(fields["tot_prec"])),
-            "limit": interp(line),
+            "limit": interp(line_native),
             "temp": interp(fields["t_2m"] - 273.15)
             - T_LAPSE * (dem0 - hsurf),
         }
