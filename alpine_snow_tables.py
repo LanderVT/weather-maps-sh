@@ -56,6 +56,7 @@ REGIONS = (
     ("julian", "Julische Alpen", ((13.28,46.10),(14.36,46.12),(14.30,46.72),(13.37,46.75))),
 )
 MODEL_LABELS = {"hybrid": "Hybrid", "icon_d2": "ICON-D2", "ecmwf": "ECMWF"}
+MODEL_MAX_DISPLAY_DAYS = {"hybrid": 2, "icon_d2": 2, "ecmwf": 7}
 NAME_PATTERN = re.compile(
     r"_(?:alps)_(\d{8})_(\d{2})z_f(\d{3})-(\d{3})", re.I
 )
@@ -538,15 +539,17 @@ def _range_text(lo, hi):
 
 
 def build_summary(now_utc: datetime | None = None):
-    """Build independent per-model regional tables, with variable forecast horizons.
+    """Build distinct per-model tables for their available forecast dates.
 
-    A model's column is shown only if at least one region/height has real
-    numeric data for that day. No artificial five-day-completeness requirement.
+    Hybrid and ICON-D2 show at most two calendar dates; ECMWF up to seven.
+    The date window starts today, and empty future days are never fabricated.
     ICON-CH2 is never included.
     """
     now_utc = now_utc or datetime.now(timezone.utc)
     today = now_utc.astimezone(LOCAL_TZ).date()
-    dates = [today + timedelta(days=i) for i in range(1, 6)]
+    # Seven local calendar dates, INCLUDING today. Previous versions silently
+    # discarded today's forecasts and capped ECMWF at five days.
+    dates = [today + timedelta(days=i) for i in range(7)]
     by_model = {name: [] for name in MODEL_LABELS}
     for file in sorted(CACHE.glob("*.json")) if CACHE.exists() else ():
         try:
@@ -602,7 +605,11 @@ def build_summary(now_utc: datetime | None = None):
                     })
                 model_data[region_id][str(alt)] = cells
         summary["data"][model] = model_data
-        summary["available_day_indices"][model] = sorted(day_available)
+        # Only display the first two available calendar dates for the
+        # short-range models, and at most seven for ECMWF. This is a display
+        # constraint, not a fabricated extension of the model forecast.
+        indices = sorted(day_available)[:MODEL_MAX_DISPLAY_DAYS[model]]
+        summary["available_day_indices"][model] = indices
     return summary
 
 
@@ -638,8 +645,8 @@ HTML_STYLES = r"""
 HTML_SECTION = r"""
 <section id="alpine-snow-tables" aria-label="Sneeuwverwachting per Alpenregio">
  <div class="as-panel">
-  <h2>❄️ Sneeuwverwachting per Alpenregio <span class="as-badge">Tot 5 dagen</span></h2>
-  <p>Kies een model. De tabel toont alleen dagen waarvoor dat model gegevens heeft: nieuwe sneeuwval (cm) per regio en hoogte.</p>
+  <h2>❄️ Sneeuwverwachting per Alpenregio <span class="as-badge">ECMWF tot 7 dagen</span></h2>
+  <p>Kies een model. Hybrid en ICON-D2 tonen maximaal twee beschikbare kalenderdagen; ECMWF maximaal zeven. De drie hoogtes staan apart en gebruiken uitsluitend daadwerkelijk beschikbare sneeuwvelden.</p>
   <div id="as-dynamic"><p>Regionale sneeuwverwachting wordt geladen…</p></div>
   <p class="as-foot">Ranges: 25e–75e percentiel van de sneeuwval in de regio op de gekozen hoogte (±100 m). Dagen met minder dan 23 uur aan modeldata zijn gedeeltelijke dagtotalen. Regiogrenzen zijn indicatief. ‘–’ betekent onvoldoende gegevens, niet 0 cm.</p>
  </div>
@@ -688,7 +695,8 @@ JS_TABLE = r"""(() => {
           '<table><thead><tr><th scope="col">Regio</th>'+headings.map(h=>'<th scope="col">'+esc(h)+'</th>').join('')+
           '</tr></thead><tbody>'+body+'</tbody></table></div>';
       }).join('');
-      details.innerHTML = '<p>'+esc(names[model])+' · '+indices.length+' beschikbare dag(en) · bijgewerkt '+esc(time)+
+      const horizonText = model === 'ecmwf' ? 'maximaal 7 dagen' : 'maximaal 2 dagen';
+      details.innerHTML = '<p>'+esc(names[model])+' · '+indices.length+' beschikbare dag(en) ('+horizonText+') · bijgewerkt '+esc(time)+
           '. Een * duidt een gedeeltelijke dag aan.</p>'+tables;
     }
     for (const b of target.querySelectorAll('[data-snow-model]')) {
@@ -732,32 +740,79 @@ JS_HIDE_CH2 = r"""(() => {
 
 
 def publish_site(summary, site=SITE):
-    """Add one model selector + three altitude tables to the generated website."""
+    """Publish snow tables in their own fourth TOP-LEVEL website tab.
+
+    The three existing main tabs are for maps only. This function modifies
+    the generated index.html, not run_forecast.py or any numerical model.
+    The site's selectModel() JavaScript already drives tab selection; extend
+    its list to include a fourth panel instead of placing a visible section
+    outside the panels (the cause of the old repeated table display).
+    """
     site.mkdir(parents=True, exist_ok=True)
     (site / "regional_snowfall.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     (site / "alpine_snow_tables.js").write_text(JS_TABLE, encoding="utf-8")
     (site / "hide_icon_ch2.js").write_text(JS_HIDE_CH2, encoding="utf-8")
+
     index = site / "index.html"
     if not index.exists():
         raise FileNotFoundError(f"Websitebestand ontbreekt: {index}")
     page = index.read_text(encoding="utf-8")
-    if 'id="alpine-snow-tables"' not in page:
-        block = (HTML_STYLES + HTML_SECTION +
-                 '<script src="alpine_snow_tables.js" defer></script>\n' +
-                 '<script src="hide_icon_ch2.js" defer></script>\n')
-        # Display the tables right below the existing model tabs, not
-        # below dozens of large PNG maps at the very bottom of the page.
-        if "</nav>" in page:
-            page = page.replace("</nav>", "</nav>\n" + block, 1)
-        elif "</main>" in page:
-            page = page.replace("</main>", block + "</main>", 1)
-        elif "</body>" in page:
-            page = page.replace("</body>", block + "</body>", 1)
+
+    if 'id="tab-tables"' not in page:
+        # The runner is patched by enable_alpine_capture.py to use just
+        # Hybrid / ECMWF / ICON-D2. Two JavaScript arrays must be extended:
+        # one for validating the selected tab and one for toggling panels.
+        existing = "['hybrid','ecmwf','icon_d2']"
+        updated = "['hybrid','ecmwf','icon_d2','tables']"
+        instances = page.count(existing)
+        if instances != 2:
+            raise RuntimeError(
+                'Kan website-tabs niet veilig uitbreiden: '
+                f'verwacht 2 modelkeuzelijsten, gevonden {instances}. '
+                'Controleer of enable_alpine_capture.py eerst is uitgevoerd.'
+            )
+        if page.count('</nav>') != 1:
+            raise RuntimeError(
+                'Kan Sneeuwtabellen-tabblad niet invoegen: '
+                'geen unieke afsluiting van de modelnavigatie gevonden'
+            )
+        if 'id="panel-hybrid"' not in page:
+            raise RuntimeError('Hybrid-paneel niet gevonden in website-HTML')
+
+        # Make the fourth tab exactly like the three existing main tabs.
+        button = (
+            '<button type="button" id="tab-tables" class="tab" role="tab" '
+            'aria-controls="panel-tables" aria-selected="false" '
+            'data-model="tables">❄️ Sneeuwtabellen</button>'
+        )
+        panel = (
+            '<div id="panel-tables" class="snow-table-panel" role="tabpanel" '
+            'aria-labelledby="tab-tables" hidden>\n'
+            + HTML_SECTION + '\n</div>\n'
+        )
+        # Important: no tables under individual map panels.
+        page = page.replace('</nav>', button + '\n</nav>\n' + panel, 1)
+        page = page.replace(existing, updated)
+
+        # Hidden must override any author styles; the old page's stale-map
+        # check targets .model-panel, so exclude this dedicated data panel.
+        css = HTML_STYLES + '\n<style>#panel-tables[hidden]{display:none!important}</style>\n'
+        if '</head>' in page:
+            page = page.replace('</head>', css + '</head>', 1)
         else:
-            page += block
+            page = css + page
+        scripts = (
+            '<script src="alpine_snow_tables.js?v=4" defer></script>\n'
+            '<script src="hide_icon_ch2.js" defer></script>\n'
+        )
+        if '</body>' in page:
+            page = page.replace('</body>', scripts + '</body>', 1)
+        else:
+            page += scripts
         index.write_text(page, encoding="utf-8")
-    # Mark the old standalone model as disabled in website metadata, if present.
+
+    # Keep old disabled-model status consistent when present.
     status_file = site / "status.json"
     if status_file.is_file():
         try:
@@ -765,7 +820,8 @@ def publish_site(summary, site=SITE):
             if "icon_ch2" in status.get("models", {}):
                 status["models"]["icon_ch2"]["status"] = "disabled"
                 status["models"]["icon_ch2"]["map_count"] = 0
-                status_file.write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+                status_file.write_text(
+                    json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
         except (OSError, ValueError, TypeError) as exc:
             print(f'::warning::ICON-CH2 status metadata not updated: {exc}', flush=True)
     return len(summary["regions"])
@@ -784,6 +840,18 @@ def main():
     print("Alpen-tabellen: beschikbare dagen per model:",
           {m: [summary["dates"][i] for i in indices] for m, indices in available.items()},
           flush=True)
+    # Different model snapshots must stay separate even when rounded 5-cm
+    # ranges happen to coincide. Log a concrete example for diagnostics.
+    for model in MODEL_LABELS:
+        example = next((
+            (reg["name"], altitude, summary["dates"][i], cell["range_cm"])
+            for reg in summary["regions"]
+            for altitude in ALTITUDES
+            for i in available.get(model, [])
+            for cell in [summary["data"][model][reg["id"]][str(altitude)][i]]
+            if cell.get("available")
+        ), None)
+        print(f"Alpen-tabellen: voorbeeld {model}: {example}", flush=True)
     if not any(available.values()):
         raise SystemExit(
             'ERROR: geen enkele beschikbare dag met echte sneeuwvelden! '
@@ -831,45 +899,106 @@ def self_test():
         print('Alpen-tabellen: echte capturetest OK (Dolomieten 1500 m = 15 cm)')
         CACHE = old_cache
         DEM_REGISTRY.clear()
-    # Partial horizons: one day for ICON-D2, two for Hybrid, five for ECMWF.
+    # Partial horizons: one day ICON-D2, two Hybrid, seven ECMWF.
     with TemporaryDirectory() as td:
         previous = CACHE
         CACHE = Path(td) / 'synthetic_records'
         CACHE.mkdir()
         today = datetime(2026, 11, 19, 12, tzinfo=timezone.utc)
-        for model, days in (("icon_d2", 1), ("hybrid", 2), ("ecmwf", 5)):
+        for model, days in (("icon_d2", 1), ("hybrid", 2), ("ecmwf", 7)):
             for n in range(days):
-                start = today + timedelta(hours=12 + 24*n)
+                start = (datetime.combine(today.astimezone(LOCAL_TZ).date(),
+                           clocktime.min, tzinfo=LOCAL_TZ)
+                         + timedelta(days=n)).astimezone(timezone.utc)
                 end = start + timedelta(hours=24)
                 row = {
                     "model": model, "run_utc": today.isoformat(),
                     "start_utc": start.isoformat(), "end_utc": end.isoformat(),
                     "file": f"{model}-{n}.png",
                     "statistics": {"dolomites": {"1500": {
-                        "q25": 10.0, "median": 15.0, "q75": 20.0, "pixels": 150
+                        "q25": {"icon_d2": 0.0, "hybrid": 10.0, "ecmwf": 25.0}[model],
+                        "median": {"icon_d2": 2.0, "hybrid": 15.0, "ecmwf": 35.0}[model],
+                        "q75": {"icon_d2": 5.0, "hybrid": 20.0, "ecmwf": 45.0}[model],
+                        "pixels": 150
                     }}}
                 }
                 (CACHE / f'{model}-{n}.json').write_text(json.dumps(row))
         summary = build_summary(datetime(2026, 11, 19, 17, tzinfo=timezone.utc))
         assert len(summary['available_day_indices']['icon_d2']) == 1
         assert len(summary['available_day_indices']['hybrid']) == 2
-        assert len(summary['available_day_indices']['ecmwf']) == 5
+        assert len(summary['available_day_indices']['ecmwf']) == 7
         assert set(summary['models_found']) == {'hybrid','icon_d2','ecmwf'}
         assert summary['data']['icon_d2']['dolomites']['1500'][0]['available']
-        assert summary['data']['ecmwf']['dolomites']['1500'][4]['available']
+        assert summary['data']['ecmwf']['dolomites']['1500'][6]['available']
+        assert summary['data']['icon_d2']['dolomites']['1500'][0]['range_cm'] == '0–5'
+        assert summary['data']['hybrid']['dolomites']['1500'][0]['range_cm'] == '10–20'
+        assert summary['data']['ecmwf']['dolomites']['1500'][0]['range_cm'] == '25–45'
+        # Explicitly verify that even accidentally longer source series
+        # cannot add extra columns to the short-range model tables.
+        for model, n in (('icon_d2', 1), ('hybrid', 2), ('ecmwf', 7)):
+            later = (datetime.combine(today.astimezone(LOCAL_TZ).date(),
+                     clocktime.min, tzinfo=LOCAL_TZ)
+                     + timedelta(days=n)).astimezone(timezone.utc)
+            record = {
+                'model': model, 'run_utc': today.isoformat(),
+                'start_utc': later.isoformat(),
+                'end_utc': (later+timedelta(hours=24)).isoformat(),
+                'file': f'{model}-extra.png',
+                'statistics': {'dolomites': {'1500': {
+                    'q25': 10., 'median': 15., 'q75': 20., 'pixels': 150}}}
+            }
+            (CACHE/f'{model}-extra.json').write_text(json.dumps(record))
+        capped = build_summary(datetime(2026, 11, 19, 17, tzinfo=timezone.utc))
+        assert len(capped['available_day_indices']['icon_d2']) == 2
+        assert len(capped['available_day_indices']['hybrid']) == 2
+        assert len(capped['available_day_indices']['ecmwf']) == 7
         CACHE = previous
-        print('Alpen-tabellen: variabele modelhorizons getest (1/2/5 dagen)')
+        print('Alpen-tabellen: afzonderlijke modelwaarden en horizons getest (1/2/7 dagen)')
     with TemporaryDirectory() as td:
         root = Path(td)
         fake = root / 'site'; fake.mkdir()
-        (fake / 'index.html').write_text('<html><main><p>Maps</p></main></html>')
+        # Use the same main-tab structure and selectModel() lists as
+        # run_forecast.py AFTER enable_alpine_capture.py disables ICON-CH2.
+        original_page = ('''<!doctype html><html><head><title>Snow maps</title></head>
+<body><main><nav class="tabs" role="tablist">
+<button id="tab-hybrid" data-model="hybrid">Hybrid</button>
+<button id="tab-ecmwf" data-model="ecmwf">ECMWF</button>
+<button id="tab-icon_d2" data-model="icon_d2">ICON-D2</button>
+</nav>
+<div id="panel-hybrid" class="model-panel">Hybrid Maps</div>
+<div id="panel-ecmwf" class="model-panel" hidden>ECMWF Maps</div>
+<div id="panel-icon_d2" class="model-panel" hidden>ICON-D2 Maps</div>
+</main><script>
+function selectModel(model) {
+  if (!['hybrid','ecmwf','icon_d2'].includes(model)) model='hybrid';
+  for (const key of ['hybrid','ecmwf','icon_d2']) {
+    document.getElementById('panel-'+key).hidden = key !== model;
+    document.getElementById('tab-'+key).setAttribute('aria-selected',String(key===model));
+  }
+}
+</script></body></html>''')
+        (fake / 'index.html').write_text(original_page, encoding='utf-8')
         sample = {'regions':[], 'data':{}, 'dates':[], 'altitudes_m':[]}
         publish_site(sample, fake)
-        page = (fake/'index.html').read_text()
-        assert 'alpine-snow-tables' in page and 'Maps' in page
+        page = (fake/'index.html').read_text(encoding='utf-8')
+        assert page.count('id="alpine-snow-tables"') == 1
+        assert page.count('id="tab-tables"') == 1
+        assert page.count('id="panel-tables"') == 1
+        assert page.count("['hybrid','ecmwf','icon_d2','tables']") == 2
+        assert page.count('data-model="tables"') == 1
+        assert page.index('</nav>') < page.index('id="panel-tables"') < page.index('id="panel-hybrid"')
+        assert 'Hybrid Maps' in page and 'ECMWF Maps' in page and 'ICON-D2 Maps' in page
+        assert 'aria-labelledby="tab-tables" hidden' in page
+        assert '#panel-tables[hidden]{display:none!important}' in page
+        # A second publication should not duplicate the tab or the tables.
+        publish_site(sample, fake)
+        page = (fake/'index.html').read_text(encoding='utf-8')
+        assert page.count('id="alpine-snow-tables"') == 1
+        assert page.count('id="tab-tables"') == 1
         assert (fake/'regional_snowfall.json').is_file()
         assert (fake/'hide_icon_ch2.js').is_file()
         assert 'icon_ch2' not in json.loads((fake/'regional_snowfall.json').read_text()).get('models_found', {})
+        print('Alpen-tabellen: vierde website-tab getest; geen duplicaten')
     print('Alpen-tabellen self-test OK')
 
 
