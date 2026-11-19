@@ -1,8 +1,8 @@
 
 name: Update SnowHybrid + ECMWF + ICON-D2 + ICON-CH2 maps (hourly)
 
-# cron-job.org triggers this using POST /actions/workflows/update.yml/dispatches.
-# Keep this workflow_dispatch trigger. No duplicate GitHub schedule is needed.
+# cron-job.org triggers POST /actions/workflows/update.yml/dispatches.
+# Keep workflow_dispatch; no duplicate GitHub schedule is required.
 on:
   workflow_dispatch:
     inputs:
@@ -24,14 +24,12 @@ concurrency:
 jobs:
   forecast:
     runs-on: ubuntu-24.04
-    timeout-minutes: 65
+    timeout-minutes: 75
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
 
     env:
-      # Same dark/slate display for all four models; other options:
-      # graphite, night, ice. No impact on model calculations.
       SNOW_MAP_THEME: 'slate'
 
       # Hybrid: 48 h, 3-hour intervals, 6 models.
@@ -40,8 +38,7 @@ jobs:
       HYBRID_MIN_MODELS: '2'
       HYBRID_ESRI_RELIEF: '1'
 
-      # Standalone ECMWF: 24-hour model-age limit retained.
-      # Alps + compact Benelux / medium mountains domain.
+      # ECMWF: Alps + compact Benelux / medium mountains region.
       ECMWF_AREAS: 'alps,full'
       ECMWF_N_DAYS: '7'
       ECMWF_GRID_STEP_ALPS: '0.008'
@@ -50,8 +47,7 @@ jobs:
       ECMWF_MAX_RUN_AGE_H: '24'
       ECMWF_ESRI_RELIEF: '1'
 
-      # Standalone ICON-D2: snowfall per local day, cumulative snowfall,
-      # snowline and freezing-level maps (6 h), up to +48 h. Alps only.
+      # Standalone ICON-D2: Alps only.
       ICON_D2_AREAS: 'alps'
       ICON_D2_DPI: '200'
       ICON_D2_GRID_STEP_ALPS: '0.008'
@@ -59,8 +55,7 @@ jobs:
       ICON_D2_ESRI_RELIEF: '1'
       ICON_D2_MAX_RUN_AGE_H: '24'
 
-      # Standalone MeteoSwiss ICON-CH2-EPS control-run, Alps, 5 days.
-      # Only 24-hour snowfall and cumulative maps (9 PNGs).
+      # Standalone ICON-CH2-EPS control run: Alps, 5 days.
       ICON_CH2_DAYS: '5'
       ICON_CH2_STEP_HOURS: '6'
       ICON_CH2_GRID_STEP_ALPS: '0.012'
@@ -76,25 +71,35 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
-      # ==========================================================
-      # INSTALL SYSTEM LIBRARIES + PNGQUANT
-      # ==========================================================
-
-      - name: Install geospatial libraries and PNG optimizer
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y \
-            libeccodes-dev \
-            libgeos-dev \
-            libproj-dev \
-            pngquant
-
-      - name: Install Python libraries
+      # No apt-get: Python wheels include native geospatial libraries.
+      - name: Install Python and geospatial libraries (no apt-get)
+        shell: bash
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          python -m pip install 'cfgrib>=0.9.14,<1'
+          python -m pip install --prefer-binary -r requirements.txt
+          python -m pip install --only-binary=:all: \
+            'eccodes>=2.43' \
+            'eccodeslib>=2.43' \
+            'cfgrib>=0.9.14,<1' \
+            'Pillow>=10' \
+            cartopy pyproj shapely
+
+          python - <<'PY'
+          import eccodes
+          import cfgrib
+          import cartopy
+          import pyproj
+          import shapely
+          from PIL import Image
+
+          print(
+              'Python wheels: ecCodes, cfgrib, Cartopy, '
+              'PROJ, GEOS and Pillow OK'
+          )
+          print('ecCodes API:', eccodes.codes_get_api_version())
+          PY
 
       - name: Check all scripts and libraries
         run: python run_forecast.py --check
@@ -102,24 +107,18 @@ jobs:
       - name: Verify dark map layout imports
         run: |
           python -m py_compile map_style_reference.py snow_dark_adapter.py
+
           python - <<'PYCODE'
           import map_style_reference as design
           import snow_dark_adapter as adapter
+
           assert design.RELIEF_THEME == 'slate'
           print('Dark/slate map layout installed for all model panels')
           PYCODE
 
-      # ==========================================================
-      # GENERATE ALL MAPS
-      # ==========================================================
-
       - name: Generate Hybrid, ECMWF, ICON-D2 and ICON-CH2 maps and website
         if: inputs.check_only != true
         run: python run_forecast.py
-
-      # ==========================================================
-      # VALIDATE WEBSITE
-      # ==========================================================
 
       - name: Validate website before deployment
         if: inputs.check_only != true
@@ -137,185 +136,212 @@ jobs:
 
           for model in ('hybrid', 'ecmwf', 'icon_d2', 'icon_ch2'):
               entry = status['models'][model]
-              print(f"{model}: {entry['status']}, {entry['map_count']} maps")
+              print(
+                  f"{model}: {entry['status']}, "
+                  f"{entry['map_count']} maps"
+              )
 
           for model in ('hybrid', 'ecmwf'):
               if status['models'][model]['status'] != 'ok':
                   raise SystemExit(
-                      f'Existing {model} forecast failed; preserving previous website'
+                      f'Existing {model} forecast failed; '
+                      f'preserving previous website'
                   )
 
           if status['models']['icon_d2']['status'] != 'ok':
               print(
-                  '::warning::ICON-D2 failed; only Hybrid and ECMWF will be updated'
+                  '::warning::ICON-D2 failed; '
+                  'only Hybrid and ECMWF will be updated'
               )
 
           if status['models']['icon_ch2']['status'] != 'ok':
               print(
-                  '::warning::ICON-CH2 failed; existing model tabs remain available'
+                  '::warning::ICON-CH2 failed; '
+                  'existing model tabs remain available'
               )
           PY
 
           du -sh site
 
-      # ==========================================================
-      # AUTOMATIC PNG COMPRESSION
-      # ==========================================================
-
-      - name: Compress all PNG maps
+      # Optional high-quality PNG optimizer, installed through pip.
+      - name: Install optional high-quality PNG optimizer
         if: inputs.check_only != true
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          python -m pip install --only-binary=:all: 'imagequant>=1.1.4,<2'
+
+      # Compress PNGs in the finished site directory.
+      # If imagequant is unavailable, use Pillow.
+      # A compression failure must never block publication.
+      - name: Compress website PNG maps (optional, safe)
+        if: inputs.check_only != true
+        continue-on-error: true
+        timeout-minutes: 12
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
-          import subprocess
+          from PIL import Image
 
-          # Compress website PNGs before GitHub Pages upload.
-          SITE_DIR = Path("site")
+          try:
+              import imagequant
+              engine = 'imagequant (80-95 quality)'
+          except ImportError:
+              imagequant = None
+              engine = 'Pillow fallback (256 colors)'
 
-          # Files smaller than 1 MiB are left unchanged.
-          MIN_SIZE_MB = 1.0
+          site = Path('site')
 
-          # Quality range:
-          # 80-95 = high quality, strong compression.
-          # Image dimensions remain unchanged.
-          PNG_QUALITY = "80-95"
-          PNG_SPEED = "4"
-
-          if not SITE_DIR.is_dir():
-              raise SystemExit(
-                  "ERROR: website directory 'site' not found."
+          if not site.is_dir():
+              print(
+                  '::warning::No site directory; '
+                  'skipping PNG optimization'
               )
+              raise SystemExit(0)
 
-          png_files = sorted(SITE_DIR.rglob("*.png"))
+          files = sorted(site.rglob('*.png'))
 
-          total_before = 0
-          total_after = 0
+          # Only compress PNG files larger than 1 MiB.
+          threshold = 1 * 1024 * 1024
 
+          before_total = 0
+          after_total = 0
           optimized = 0
           skipped = 0
           failed = 0
 
           print()
-          print("========================================")
-          print(" AUTOMATIC PNG COMPRESSION")
-          print("========================================")
-          print(f"PNG files found: {len(png_files)}")
-          print(f"Quality: {PNG_QUALITY}")
-          print(f"Minimum file size: {MIN_SIZE_MB} MiB")
+          print('========================================')
+          print(' PNG OPTIMIZATION')
+          print('========================================')
+          print('Optimizer:', engine)
+          print('PNG files found:', len(files))
           print()
 
-          for path in png_files:
+          for path in files:
 
               before = path.stat().st_size
-              total_before += before
+              before_total += before
 
-              # Skip small files, icons and logos.
-              if before < MIN_SIZE_MB * 1024 * 1024:
-                  total_after += before
+              if before < threshold:
+                  after_total += before
                   skipped += 1
                   continue
 
-              result = subprocess.run(
-                  [
-                      "pngquant",
-                      "--quality=" + PNG_QUALITY,
-                      "--speed=" + PNG_SPEED,
-                      "--strip",
-                      "--skip-if-larger",
-                      "--force",
-                      "--ext=.png",
-                      "--",
-                      str(path),
-                  ],
-                  capture_output=True,
-                  text=True,
+              temporary = path.with_name(
+                  path.name + '.optimizing.png'
               )
 
-              after = path.stat().st_size
-              total_after += after
+              try:
+                  with Image.open(path) as original:
 
-              if result.returncode == 0:
+                      dimensions = original.size
 
-                  optimized += 1
+                      if original.mode in ('P', 'L', '1'):
+                          # Re-encode indexed/grayscale files losslessly.
+                          result = original.copy()
 
-                  reduction = (
-                      100.0 * (before - after) / before
-                  )
+                      elif imagequant is not None:
+                          # High-quality palette optimization.
+                          result = imagequant.quantize_pil_image(
+                              original.convert('RGBA'),
+                              dithering_level=0.7,
+                              max_colors=256,
+                              min_quality=80,
+                              max_quality=95,
+                          )
 
-                  print(
-                      f"{path.name}: "
-                      f"{before / 1024**2:.2f} MB -> "
-                      f"{after / 1024**2:.2f} MB "
-                      f"(-{reduction:.1f}%)"
-                  )
+                      else:
+                          # Pillow fallback if imagequant is unavailable.
+                          rgba = original.convert('RGBA')
+                          result = rgba.quantize(
+                              colors=256,
+                              method=Image.Quantize.FASTOCTREE,
+                          )
 
-              elif result.returncode in (98, 99):
+                      result.save(
+                          temporary,
+                          format='PNG',
+                          optimize=True
+                      )
+                      result.close()
 
-                  # pngquant decided not to overwrite the file,
-                  # because the quality or size constraints
-                  # could not be satisfied.
-                  skipped += 1
+                  # Check the optimized PNG before replacing anything.
+                  with Image.open(temporary) as check:
+                      check.verify()
 
-                  print(f"Skipped: {path.name}")
+                  with Image.open(temporary) as check:
+                      if check.size != dimensions:
+                          raise RuntimeError(
+                              'Image dimensions changed'
+                          )
 
-              else:
+                  after = temporary.stat().st_size
 
-                  # Preserve original PNG when optimization fails.
+                  if after < before:
+
+                      # Replace the original only when the new file
+                      # is valid and actually smaller.
+                      temporary.replace(path)
+                      optimized += 1
+
+                      reduction = (
+                          100 * (before - after) / before
+                      )
+
+                      print(
+                          f'{path.name}: '
+                          f'{before / 1048576:.2f} -> '
+                          f'{after / 1048576:.2f} MiB '
+                          f'(-{reduction:.0f}%)'
+                      )
+
+                  else:
+                      temporary.unlink()
+                      skipped += 1
+
+              except Exception as exc:
+
                   failed += 1
-
                   print(
-                      f"::warning::PNG optimization failed "
-                      f"for {path.name}: "
-                      f"{result.stderr.strip()}"
+                      f'::warning::PNG unchanged: '
+                      f'{path.name}: {exc}'
                   )
 
-          saved = total_before - total_after
+              finally:
+                  temporary.unlink(missing_ok=True)
+
+              after_total += path.stat().st_size
 
           print()
-          print("========================================")
-          print(" PNG COMPRESSION SUMMARY")
-          print("========================================")
+          print('========================================')
+          print(' PNG COMPRESSION SUMMARY')
+          print('========================================')
 
-          print(f"Optimized files: {optimized}")
-          print(f"Skipped files:   {skipped}")
-          print(f"Failed files:    {failed}")
-
-          print(
-              f"Total before: "
-              f"{total_before / 1024**2:.1f} MB"
-          )
+          print(f'Optimized: {optimized}')
+          print(f'Skipped:   {skipped}')
+          print(f'Failed:    {failed}')
 
           print(
-              f"Total after:  "
-              f"{total_after / 1024**2:.1f} MB"
+              f'Before: {before_total / 1048576:.1f} MiB'
           )
-
           print(
-              f"Space saved:  "
-              f"{saved / 1024**2:.1f} MB"
+              f'After:  {after_total / 1048576:.1f} MiB'
+          )
+          print(
+              f'Saved:  '
+              f'{(before_total - after_total) / 1048576:.1f} MiB'
           )
 
-          if total_before > 0:
-
-              reduction = (
-                  100.0 * saved / total_before
-              )
-
+          if before_total:
               print(
-                  f"Total reduction: {reduction:.1f}%"
+                  f'Total reduction: '
+                  f'{100 * (before_total - after_total) / before_total:.1f}%'
               )
-
-          print("========================================")
           PY
 
-          echo ""
-          echo "Website size after PNG compression:"
           du -sh site
-
-      # ==========================================================
-      # PUBLISH TO GITHUB PAGES
-      # ==========================================================
 
       - name: Configure Pages
         if: inputs.check_only != true
