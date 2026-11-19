@@ -41,10 +41,10 @@ jobs:
       HYBRID_ESRI_RELIEF: '1'
 
       # Standalone ECMWF: 24-hour model-age limit retained; Alps only.
-      ECMWF_AREAS: 'alps'
+      ECMWF_AREAS: 'alps,full'
       ECMWF_N_DAYS: '7'
       ECMWF_GRID_STEP_ALPS: '0.008'
-      ECMWF_GRID_STEP_FULL: '0.016'
+      ECMWF_GRID_STEP_FULL: '0.01'
       ECMWF_DPI: '200'
       ECMWF_MAX_RUN_AGE_H: '24'
       ECMWF_ESRI_RELIEF: '1'
