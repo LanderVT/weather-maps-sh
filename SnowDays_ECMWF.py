@@ -1,3 +1,4 @@
+
 """
 ECMWF IFS | Verse sneeuw per dag voor de Alpen en West-Europa, gedownscaled
 
@@ -73,9 +74,9 @@ STEP_HOURS = 6
 N_DAYS = 7  # aantal dagkaarten (de eerste is 'rest van vandaag')
 
 PL_LEVELS = ("925", "850", "700")
-SNOW_TW = 1.3          # natteboltemperatuur (graden C) op de sneeuwvalgrens
-TW_LAPSE = 0.005       # graden C per meter, voor extrapolatie buiten 925-700
-SNOW_BAND_M = 200      # halve breedte van de regen/sneeuw-overgang
+SNOW_TW = 1.3
+TW_LAPSE = 0.005
+SNOW_BAND_M = 200
 
 # Neerslag-hoogtegradient (MicroMet-vorm, Liston & Elder 2006):
 #   P = P0 * (1 + chi*dz) / (1 - chi*dz), dz in km t.o.v. glad terrein.
@@ -83,20 +84,26 @@ SNOW_BAND_M = 200      # halve breedte van de regen/sneeuw-overgang
 # 0 zet de correctie uit. De factor wordt genormaliseerd, zodat het
 # totaal op 25 km-schaal gelijk blijft aan ECMWF (alleen herverdeling).
 PRECIP_CHI_PER_KM = 0.20
-PRECIP_SMOOTH_DEG = 0.125   # ~ effectieve resolutie van 0.25-gradenvelden
+PRECIP_SMOOTH_DEG = 0.125
 PRECIP_FACTOR_RANGE = (0.5, 2.0)
 
-# "full" = West-Europa (zoals in SnowAll_ICON-D2), "alps" = Alpen.
+# "full" = Benelux + Vogezen + Zwarte Woud + Sauerland; "alps" = Alpen.
+# We houden de interne sleutel "full" en de PNG-bestandsnamen ongewijzigd,
+# zodat de bestaande publicatie naar de website blijft werken.
 AREAS_TO_MAKE = tuple(
     area.strip() for area in os.getenv("ECMWF_AREAS", "full,alps").split(",")
     if area.strip()
 )
+
 AREA_LIMITS = {
-    "full": [-2.0, 21.0, 42.0, 56.0],
+    # West, oost, zuid, noord (graden)
+    # Benelux + Vogezen + Zwarte Woud + Sauerland
+    "full": [2.4, 9.6, 47.3, 53.8],
     "alps": [5.0, 16.8, 43.6, 49.0],
 }
 
-# Fijn doelrooster in graden (~300-450 m) en DEM-zoom per gebied.
+# 0.008 graden voor het compacte Benelux-domein (~0.6-0.9 km);
+# de Alpen blijven op hun oude 0.004-gradenrooster (~300-450 m).
 DEM_ZOOM = {"full": 8, "alps": 9}
 GRID_STEP = {"full": 0.008, "alps": 0.004}
 
@@ -109,7 +116,7 @@ LOCAL_TZ = ZoneInfo("Europe/Brussels")
 
 # Is de nieuwste beschikbare run ouder dan dit (uur), dan maakt het
 # script niets en blijven de vorige kaarten staan.
-MAX_RUN_AGE_H = 24  # 00/12 UTC runs are not published immediately
+MAX_RUN_AGE_H = 24
 
 CITY_FONT = {"full": 7.5, "alps": 8.0}
 MAX_CITY_LABELS = {"full": 45, "alps": 38}
@@ -118,34 +125,26 @@ LABEL_GAP_PX = 4
 
 # Verse-sneeuwdichtheid naar temperatuur (Anderson 1976, SNOW-17):
 #   rho = 50 + 1.7 * (T + 15)^1.5 kg/m3, T = natteboltemperatuur op de pixel.
-# ~6.5:1 rond 0 graden en ~10:1 bij -5; nooit lichter dan SNOW_RHO_MIN.
-# False = vast 10:1 zoals de ICON-scripts.
 VARIABLE_DENSITY = True
-SNOW_RHO_MIN = 100.0  # kg/m3, = 10:1
+SNOW_RHO_MIN = 100.0
 
 # Mini-sneeuwdekmodel voor de cumulatieve kaarten ('nieuwe sneeuw op de
 # grond'). Alleen de NIEUWE sneeuw wordt gevolgd; de bestaande sneeuwlaag
-# is onbekend. Eenvoudige, instelbare aannames:
-#   inklinken: dichtheid nadert RHO_*_MAX met tijdconstante TAU_* (uur);
-#              'nat' = T > 0 of regen in die 6 uur.
-#   smelten:   graaddagen DDF * max(T, 0); in november weinig zon.
-#              Bij regen op sneeuw extra (ROS_FACTOR, vuistregel voor
-#              de warme, vochtige en winderige lucht) plus de warmte
-#              van het regenwater zelf (regen * T / 80).
+# is onbekend.
 RHO_DRY_MAX = 250.0
 RHO_WET_MAX = 350.0
 TAU_DRY_H = 96.0
 TAU_WET_H = 24.0
 DDF_MM_PER_DEG_DAY = 2.5
 ROS_FACTOR = 1.5
-RAIN_ON_SNOW_MM = 0.5  # minimale regen per 6 uur voor 'regen op sneeuw'
+RAIN_ON_SNOW_MM = 0.5
 
 # Regenlaag op de sneeuwvalkaarten (per dag en cumulatief), mm = l/m2.
 # False = alleen sneeuw, zonder tweede kleurbalk.
 SHOW_RAIN = False
 RAIN_LEVELS = np.array([1, 4, 10, 20, 30, 40, 60, 80, 120])
 RAIN_COLORS = ("#e3e8f0", "#3c4f85")
-SNOW_CM_PER_MM = 1.0  # alleen bij VARIABLE_DENSITY = False
+SNOW_CM_PER_MM = 1.0
 SNOW_MIN_CM = 0.5
 
 SNOW_LEVELS = np.array([
@@ -171,8 +170,11 @@ MONTHS = [
     "juli", "augustus", "september", "oktober", "november", "december"
 ]
 
-# Complete stedenlijst, met extra dekking rond Parijs en Noord-Duitsland.
-# De labels worden later automatisch verdeeld; niet alle steden hoeven zichtbaar te zijn.
+
+# ============================================================
+# 2. STEDEN
+# ============================================================
+
 CITIES = [
     # BELGIE
     ("Brussel", 4.35, 50.85), ("Antwerpen", 4.40, 51.22),
@@ -191,7 +193,7 @@ CITIES = [
     # LUXEMBURG
     ("Luxemburg", 6.13, 49.61),
 
-    # FRANKRIJK: ook Parijs en Noord-/Midden-Frankrijk
+    # FRANKRIJK
     ("Parijs", 2.35, 48.86), ("Rouen", 1.10, 49.44),
     ("Orléans", 1.91, 47.90), ("Chartres", 1.49, 48.45),
     ("Beauvais", 2.08, 49.43), ("Compiègne", 2.82, 49.42),
@@ -206,6 +208,12 @@ CITIES = [
     ("Besançon", 6.03, 47.24), ("Lille", 3.06, 50.63),
     ("Amiens", 2.30, 49.90),
 
+    # VOGEZEN EN ZWARTE WOUD
+    ("Épinal", 6.45, 48.17), ("Gérardmer", 6.88, 48.07),
+    ("Colmar", 7.36, 48.08), ("Mulhouse", 7.34, 47.75),
+    ("Baden-Baden", 8.24, 48.76),
+    ("Freudenstadt", 8.41, 48.46),
+
     # MIDDEN- EN ZUIDWEST-FRANKRIJK
     ("Poitiers", 0.34, 46.58), ("Limoges", 1.26, 45.83),
     ("Clermont-Ferrand", 3.08, 45.78), ("Nevers", 3.16, 46.99),
@@ -213,10 +221,10 @@ CITIES = [
     ("Angoulême", 0.16, 45.65), ("Cahors", 1.44, 44.45),
     ("Moulins", 3.33, 46.57),
 
-    # LONDEN EN ZUIDOOST-ENGELAND
+    # ENGELAND
     ("Londen", -0.13, 51.51), ("Cambridge", 0.12, 52.21),
 
-    # WEST-POLEN (BUITEN DE ALPENKAART; WORDT AUTOMATISCH OVERGESLAGEN)
+    # WEST-POLEN
     ("Szczecin", 14.55, 53.43), ("Poznań", 16.93, 52.41),
     ("Wrocław", 17.04, 51.11), ("Zielona Góra", 15.51, 51.94),
     ("Gorzów", 15.23, 52.73), ("Legnica", 16.16, 51.21),
@@ -226,7 +234,7 @@ CITIES = [
     ("Bern", 7.45, 46.95), ("Zürich", 8.54, 47.38),
     ("Basel", 7.59, 47.56), ("Chur", 9.53, 46.85),
 
-    # NOORD-DUITSLAND en MIDDEN-DUITSLAND
+    # NOORD- EN MIDDEN-DUITSLAND
     ("Hamburg", 9.99, 53.55), ("Bremen", 8.80, 53.08),
     ("Hannover", 9.73, 52.38), ("Berlijn", 13.40, 52.52),
     ("Kiel", 10.12, 54.32), ("Lübeck", 10.69, 53.87),
@@ -240,7 +248,7 @@ CITIES = [
     ("Würzburg", 9.94, 49.79), ("Mainz", 8.25, 50.00),
     ("Koblenz", 7.59, 50.36),
 
-    # DUITSLAND: bestaande steden
+    # DUITSLAND
     ("Freiburg", 7.85, 47.99), ("Stuttgart", 9.18, 48.78),
     ("Karlsruhe", 8.40, 49.01), ("München", 11.58, 48.14),
     ("Augsburg", 10.90, 48.37), ("Nürnberg", 11.08, 49.45),
@@ -249,6 +257,10 @@ CITIES = [
     ("Dresden", 13.74, 51.05), ("Düsseldorf", 6.78, 51.23),
     ("Dortmund", 7.47, 51.51), ("Aken", 6.08, 50.78),
     ("Kassel", 9.48, 51.31),
+
+    # SAUERLAND
+    ("Winterberg", 8.53, 51.19),
+    ("Schmallenberg", 8.29, 51.15),
 
     # OOSTENRIJK
     ("Innsbruck", 11.40, 47.27), ("Salzburg", 13.05, 47.81),
@@ -487,7 +499,7 @@ def wet_bulb(t_c, rh):
 def snow_limit(fields):
     """Hoogte (m) waar Tw = SNOW_TW, van boven naar beneden gezocht."""
 
-    levels = sorted(PL_LEVELS, key=int, reverse=True)  # laag -> hoog
+    levels = sorted(PL_LEVELS, key=int, reverse=True)
 
     H = np.stack([fields[("gh", lv)] for lv in levels])
     TW = np.stack([
@@ -495,14 +507,12 @@ def snow_limit(fields):
         for lv in levels
     ])
 
-    # Standaard: extrapolatie onder het laagste of boven het hoogste vlak.
     below = H[0] - (SNOW_TW - TW[0]) / TW_LAPSE
     above = H[-1] + (TW[-1] - SNOW_TW) / TW_LAPSE
 
     limit = np.where(TW[-1] > SNOW_TW, above, below)
     found = TW[-1] > SNOW_TW
 
-    # Eerste overgang warm (onder) -> koud (boven), van boven af.
     for k in range(len(levels) - 2, -1, -1):
 
         cross = (
@@ -627,7 +637,6 @@ def precip_factor(dem, step=None):
         (1 + a) / np.maximum(1 - a, 1e-3), *PRECIP_FACTOR_RANGE
     )
 
-    # Massabehoud: gemiddeld 1 over ~25 km.
     factor = factor / np.maximum(
         gaussian_filter(factor, sigma, mode="nearest"), 1e-3
     )
@@ -641,29 +650,20 @@ def precip_factor(dem, step=None):
 
 
 def snow_cm_per_mm(dem, line):
-    """cm verse sneeuw per mm water, uit de natteboltemperatuur op de pixel.
-
-    Boven de sneeuwvalgrens (Tw = SNOW_TW) daalt Tw met TW_LAPSE per meter.
-    """
+    """cm verse sneeuw per mm water, uit de natteboltemperatuur op de pixel."""
 
     tw = SNOW_TW - TW_LAPSE * (dem - line)
     tw = np.clip(tw, -15.0, SNOW_TW)
 
-    # Nooit luchtiger dan 10:1: koude toppen hebben in de praktijk wind
-    # en verdichting, en de formule geldt voor windstille vlakke grond.
     rho = np.maximum(50.0 + 1.7 * (tw + 15.0) ** 1.5, SNOW_RHO_MIN)
 
     return 100.0 / rho
 
 
 def pixel_temperature(x, y, fields, xf, yf, dem):
-    """Luchttemperatuur (graden C) op DEM-hoogte, uit T en gh op drukvlakken.
+    """Luchttemperatuur (graden C) op DEM-hoogte, uit T en gh op drukvlakken."""
 
-    Lineair in de hoogte tussen 925-850 en 850-700 hPa, daarbuiten
-    geextrapoleerd met de gradient van de dichtstbijzijnde laag.
-    """
-
-    levels = sorted(PL_LEVELS, key=int, reverse=True)  # laag -> hoog
+    levels = sorted(PL_LEVELS, key=int, reverse=True)
 
     T = [to_fine(x, y, fields[("t", lv)] - 273.15, xf, yf) for lv in levels]
     H = [to_fine(x, y, fields[("gh", lv)], xf, yf) for lv in levels]
@@ -690,7 +690,6 @@ def snowpack_step(swe, depth, snow_mm, snow_cm, rain_mm, temp):
 
     has_snow = (swe > 1e-3) & (depth > 1e-3)
 
-    # Inklinken naar een maximale dichtheid, sneller als de sneeuw nat is.
     wet = (temp > 0) | (rain_mm > RAIN_ON_SNOW_MM)
     rho = np.where(has_snow, 100.0 * swe / np.maximum(depth, 1e-3), 0.0)
     rho_max = np.where(wet, RHO_WET_MAX, RHO_DRY_MAX)
@@ -700,7 +699,6 @@ def snowpack_step(swe, depth, snow_mm, snow_cm, rain_mm, temp):
         rho < rho_max, rho_max - (rho_max - rho) * np.exp(-dt / tau), rho
     )
 
-    # Smelten: graaddagen, extra bij regen op sneeuw, plus regenwarmte.
     warm = np.maximum(temp, 0.0)
     ros = np.where(rain_mm > RAIN_ON_SNOW_MM, ROS_FACTOR, 1.0)
 
@@ -740,7 +738,7 @@ def region_label(area):
     return (
         "Alpen"
         if area == "alps"
-        else "West-Europa"
+        else "Benelux + middelgebergten"
     )
 
 
@@ -792,20 +790,23 @@ def common_axes(extent, area="alps"):
     return fig, ax, proj
 
 
-# Eerst een evenwichtige spreiding over Frankrijk, de Benelux,
-# Noord-/Midden-Duitsland en de Alpen. Niet langer 15 Benelux-steden
-# vóór de eerste stad in Noord-Duitsland.
 PRIORITY_CITIES = {
     "full": [
-        "Parijs", "Hamburg", "Berlijn", "Brussel", "Amsterdam",
-        "Londen", "Szczecin", "Limoges", "Wrocław", "Hannover",
-        "Leipzig", "Bremen", "Clermont-Ferrand", "Poitiers", "Lyon",
-        "Zürich", "Rouen", "Orléans", "Poznań", "Frankfurt",
-        "Keulen", "Groningen", "Dresden", "München", "Praag",
-        "Milaan", "Genève", "Wenen", "Innsbruck", "Grenoble",
-        "Zagreb", "Stuttgart", "Luxemburg", "Rostock", "Nürnberg",
-        "Salzburg", "Genua", "Graz", "Venetië", "Dijon",
-        "Brno", "Kassel", "Périgueux", "Nevers",
+        # Benelux
+        "Brussel", "Amsterdam", "Luxemburg", "Groningen",
+        "Antwerpen", "Rotterdam", "Utrecht", "Eindhoven",
+        "Gent", "Maastricht", "Luik", "Zwolle",
+
+        # Vogezen en Zwarte Woud
+        "Straatsburg", "Épinal", "Gérardmer", "Colmar",
+        "Freiburg", "Freudenstadt", "Baden-Baden", "Karlsruhe",
+
+        # Sauerland en omliggend Duitsland
+        "Winterberg", "Dortmund", "Keulen", "Düsseldorf",
+        "Koblenz", "Frankfurt", "Stuttgart", "Münster",
+
+        # Overige plaatsen
+        "Lille", "Nancy", "Metz", "Reims", "Basel",
     ],
 
     "alps": [
@@ -824,9 +825,7 @@ BENELUX_NAMES = {
     "Groningen", "Arnhem", "Nijmegen", "Zwolle", "Luxemburg",
 }
 
-# Maximaal 8 Benelux-labels op een FULL-kaart; zo blijft plaats
-# over voor het lege westen van Frankrijk en Noord-Duitsland.
-BENELUX_LABEL_CAP = 8
+BENELUX_LABEL_CAP = 22
 
 GRID_COLS = {"full": 6, "alps": 5}
 GRID_ROWS = {"full": 4, "alps": 3}
@@ -834,12 +833,7 @@ GRID_CELL_CAP = {"full": 3, "alps": 4}
 
 
 def add_cities(fig, ax, extent, area, logo_artist):
-    """Geografisch gespreide steden met gecontroleerde tekstvakken.
-
-    De stip blijft op de juiste coördinaat. Alleen het label verschuift.
-    Prioriteiten worden afgewisseld tussen de landsdelen en per
-    kaartsegment geldt een maximum, zodat geen gebied alle labels opslokt.
-    """
+    """Geografisch gespreide steden met gecontroleerde tekstvakken."""
 
     fig.canvas.draw()
 
@@ -896,8 +890,6 @@ def add_cities(fig, ax, extent, area, logo_artist):
     cell_counts = {}
     benelux_count = 0
 
-    # Bescherm de geografische spreiding, ook wanneer veel meer steden
-    # in de Benelux beschikbaar zijn dan in andere regio's.
     def cell_for(city):
 
         px, py = city[3], city[4]
@@ -1072,7 +1064,6 @@ def add_cities(fig, ax, extent, area, logo_artist):
 
         return False
 
-    # Eerste fase: belangrijke steden, verspreid over het volledige domein.
     for city in priority:
 
         if len(chosen) >= MAX_CITY_LABELS[area]:
@@ -1080,8 +1071,6 @@ def add_cities(fig, ax, extent, area, logo_artist):
 
         try_city(city)
 
-    # Tweede fase: zoek telkens de stad in een minst gevuld kaartvak;
-    # daarbinnen heeft grotere afstand tot bestaande steden voorrang.
     while remaining and len(chosen) < MAX_CITY_LABELS[area]:
 
         candidates = [
@@ -1249,7 +1238,7 @@ def finish_map(
             0.035
         ])
 
-        rcb = fig.colorbar(rain_cf, cax=rax, orientation="horizontal")
+        rcb = fig.colorbar(rcf, cax=rax, orientation="horizontal")
         rcb.set_label(rain_label, fontsize=14, labelpad=5)
         rcb.set_ticks(rain_levels)
         rcb.ax.tick_params(labelsize=9)
@@ -1344,7 +1333,6 @@ def plot_snowfall(
             ~np.isfinite(rain) | (rain < RAIN_LEVELS[0]), rain
         )
 
-        # Onder de sneeuw, licht doorzichtig zodat het reliëf zichtbaar blijft.
         rcf = ax.contourf(
             x, y, rz,
             levels=RAIN_LEVELS,
@@ -1427,7 +1415,6 @@ def iterate_steps(session, run, steps, area, include_ground_temp=True):
             download_step(session, run, step), box
         )
 
-        # tp is cumulatief vanaf de run (m); op +0 soms afwezig.
         cur = {
             "tp": fields.get(("tp", "sfc"), 0.0) * 1000.0,
             "limit": snow_limit(fields),
@@ -1459,7 +1446,6 @@ def iterate_steps(session, run, steps, area, include_ground_temp=True):
             0.0, 1.0
         )
 
-        # mm water -> cm sneeuw, per 6 uur met de dan geldende T.
         cm_per_mm = (
             snow_cm_per_mm(dem0, line)
             if VARIABLE_DENSITY else SNOW_CM_PER_MM
@@ -1495,7 +1481,6 @@ def main():
             "User-Agent": "SneeuwhoogteNL-ECMWF-snowdays/1.1"
         })
 
-        # Ruim genoeg voor de laatste dag, ook bij een run van gisteren.
         run = newest_run(session, 24 * (N_DAYS + 2))
 
         age_h = (now - run).total_seconds() / 3600
@@ -1520,36 +1505,45 @@ def main():
 
         for area in AREAS_TO_MAKE:
             if area not in AREA_LIMITS:
-                raise ValueError(f"Onbekend gebied: {area!r}. Kies 'alps' of 'full'.")
+                raise ValueError(
+                    f"Onbekend gebied: {area!r}. Kies 'alps' of 'full'."
+                )
 
             extent = AREA_LIMITS[area]
-            make_ground = (area == "alps")  # Geen sneeuwdekkaarten voor West-Europa.
-            expected += 2 * len(windows) - 1 + (len(windows) if make_ground else 0)
+            make_ground = (area == "alps")
+            expected += 2 * len(windows) - 1 + (
+                len(windows) if make_ground else 0
+            )
 
             daily_snow = None
             daily_rain = None
             on_ground = {} if make_ground else None
             swe = depth = None
 
-            for item in iterate_steps(session, run, steps, area,
-                                      include_ground_temp=make_ground):
+            for item in iterate_steps(
+                session, run, steps, area,
+                include_ground_temp=make_ground
+            ):
                 if daily_snow is None:
                     xf, yf, land = item["xf"], item["yf"], item["land"]
-                    # Float32 reduces memory for the large West-Europe domain.
+
                     daily_snow = {
                         window: np.zeros(land.shape, dtype=np.float32)
                         for window in windows
                     }
+
                     if SHOW_RAIN:
                         daily_rain = {
                             window: np.zeros(land.shape, dtype=np.float32)
                             for window in windows
                         }
+
                     if make_ground:
                         swe = np.zeros(land.shape, dtype=np.float32)
                         depth = np.zeros(land.shape, dtype=np.float32)
 
                 a, b = item["a"], item["b"]
+
                 for window in windows:
                     if window[0] <= a < window[1]:
                         daily_snow[window] += item["snow_cm"]
@@ -1562,53 +1556,84 @@ def main():
                         swe, depth, item["snow_mm"], item["snow_cm"],
                         item["rain_mm"], item["temp"]
                     )
+
                     if any(b == window[1] for window in windows):
                         on_ground[b] = depth.astype(np.float32, copy=True)
 
-            # Toon dagelijkse en cumulatieve sneeuwval, zonder alle
-            # cumulatieve kaarten tegelijk in het geheugen te houden.
             def save_map(start, end, snow, rain, total=False):
                 nonlocal count
+
                 snow = np.where(land, snow, np.nan)
+
                 if SHOW_RAIN and rain is not None:
                     rain = np.where(land, rain, np.nan)
 
-                kind = ("op de grond" if rain is None else
-                        "cumulatief" if total else "sneeuwval")
-                print(f"+{start:03d}-{end:03d} {kind}: "
-                      f"max {np.nanmax(snow):.0f} cm")
+                kind = (
+                    "op de grond" if rain is None else
+                    "cumulatief" if total else "sneeuwval"
+                )
+
+                print(
+                    f"+{start:03d}-{end:03d} {kind}: "
+                    f"max {np.nanmax(snow):.0f} cm"
+                )
+
                 try:
                     plot_snowfall(
                         snow, xf, yf, extent, area, run,
                         start, end, rain, total
                     )
                     count += 1
+
                 except Exception as exc:
                     print(f"FOUT {kind} {area} +{start}-{end}: {exc}")
 
             snow_sum = np.zeros(land.shape, dtype=np.float32)
-            rain_sum = (np.zeros(land.shape, dtype=np.float32)
-                        if SHOW_RAIN else 0.0)
+            rain_sum = (
+                np.zeros(land.shape, dtype=np.float32)
+                if SHOW_RAIN else 0.0
+            )
 
             for k, (start, end) in enumerate(windows):
-                # pop(): na het tekenen van een dag kan zijn array weg.
+
                 snow = daily_snow.pop((start, end))
-                rain = daily_rain.pop((start, end)) if SHOW_RAIN else 0.0
+                rain = (
+                    daily_rain.pop((start, end))
+                    if SHOW_RAIN else 0.0
+                )
+
                 save_map(start, end, snow, rain)
 
                 snow_sum += snow
+
                 if SHOW_RAIN:
                     rain_sum += rain
+
                 if k > 0:
-                    save_map(windows[0][0], end, snow_sum, rain_sum, total=True)
+                    save_map(
+                        windows[0][0], end,
+                        snow_sum, rain_sum,
+                        total=True
+                    )
 
             if make_ground:
                 for start, end in windows:
-                    save_map(windows[0][0], end, on_ground.pop(end), None)
+                    save_map(
+                        windows[0][0],
+                        end,
+                        on_ground.pop(end),
+                        None
+                    )
 
-        print(f"\nKlaar: {count}/{expected} kaarten. Opslag: {OUTPUT_DIR}")
+        print(
+            f"\nKlaar: {count}/{expected} kaarten. "
+            f"Opslag: {OUTPUT_DIR}"
+        )
+
         if count == 0:
-            raise RuntimeError("Geen kaarten gemaakt; controleer de fouten hierboven")
+            raise RuntimeError(
+                "Geen kaarten gemaakt; controleer de fouten hierboven"
+            )
 
 
 if __name__ == "__main__":
