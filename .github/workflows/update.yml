@@ -40,7 +40,8 @@ jobs:
       HYBRID_MIN_MODELS: '2'
       HYBRID_ESRI_RELIEF: '1'
 
-      # Standalone ECMWF: 24-hour model-age limit retained; Alps only.
+      # Standalone ECMWF: 24-hour model-age limit retained.
+      # Alps + compact Benelux / medium mountains domain.
       ECMWF_AREAS: 'alps,full'
       ECMWF_N_DAYS: '7'
       ECMWF_GRID_STEP_ALPS: '0.008'
@@ -60,8 +61,8 @@ jobs:
 
       # Standalone MeteoSwiss ICON-CH2-EPS control-run, Alps, 5 days.
       # Only 24-hour snowfall and cumulative maps (9 PNGs).
-      ICON_CH2_DAYS: '5'   # change to '4' for 4 daily + 3 cumulative
-      ICON_CH2_STEP_HOURS: '6'  # 3 is more precise but downloads twice as many fields
+      ICON_CH2_DAYS: '5'
+      ICON_CH2_STEP_HOURS: '6'
       ICON_CH2_GRID_STEP_ALPS: '0.012'
       ICON_CH2_DPI: '200'
       ICON_CH2_MAX_RUN_AGE_H: '24'
@@ -76,10 +77,18 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install geospatial libraries
+      # ==========================================================
+      # INSTALL SYSTEM LIBRARIES + PNGQUANT
+      # ==========================================================
+
+      - name: Install geospatial libraries and PNG optimizer
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y libeccodes-dev libgeos-dev libproj-dev
+          sudo apt-get install -y \
+            libeccodes-dev \
+            libgeos-dev \
+            libproj-dev \
+            pngquant
 
       - name: Install Python libraries
         run: |
@@ -100,9 +109,17 @@ jobs:
           print('Dark/slate map layout installed for all model panels')
           PYCODE
 
+      # ==========================================================
+      # GENERATE ALL MAPS
+      # ==========================================================
+
       - name: Generate Hybrid, ECMWF, ICON-D2 and ICON-CH2 maps and website
         if: inputs.check_only != true
         run: python run_forecast.py
+
+      # ==========================================================
+      # VALIDATE WEBSITE
+      # ==========================================================
 
       - name: Validate website before deployment
         if: inputs.check_only != true
@@ -110,22 +127,195 @@ jobs:
           python - <<'PY'
           import json
           from pathlib import Path
+
           p = Path('site/status.json')
+
           if not p.is_file():
               raise SystemExit('No website status.json was generated')
+
           status = json.loads(p.read_text(encoding='utf-8'))
+
           for model in ('hybrid', 'ecmwf', 'icon_d2', 'icon_ch2'):
               entry = status['models'][model]
               print(f"{model}: {entry['status']}, {entry['map_count']} maps")
+
           for model in ('hybrid', 'ecmwf'):
               if status['models'][model]['status'] != 'ok':
-                  raise SystemExit(f'Existing {model} forecast failed; preserving previous website')
+                  raise SystemExit(
+                      f'Existing {model} forecast failed; preserving previous website'
+                  )
+
           if status['models']['icon_d2']['status'] != 'ok':
-              print('::warning::ICON-D2 failed; only Hybrid and ECMWF will be updated')
+              print(
+                  '::warning::ICON-D2 failed; only Hybrid and ECMWF will be updated'
+              )
+
           if status['models']['icon_ch2']['status'] != 'ok':
-              print('::warning::ICON-CH2 failed; existing model tabs remain available')
+              print(
+                  '::warning::ICON-CH2 failed; existing model tabs remain available'
+              )
           PY
+
           du -sh site
+
+      # ==========================================================
+      # AUTOMATIC PNG COMPRESSION
+      # ==========================================================
+
+      - name: Compress all PNG maps
+        if: inputs.check_only != true
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          # Compress website PNGs before GitHub Pages upload.
+          SITE_DIR = Path("site")
+
+          # Files smaller than 1 MiB are left unchanged.
+          MIN_SIZE_MB = 1.0
+
+          # Quality range:
+          # 80-95 = high quality, strong compression.
+          # Image dimensions remain unchanged.
+          PNG_QUALITY = "80-95"
+          PNG_SPEED = "4"
+
+          if not SITE_DIR.is_dir():
+              raise SystemExit(
+                  "ERROR: website directory 'site' not found."
+              )
+
+          png_files = sorted(SITE_DIR.rglob("*.png"))
+
+          total_before = 0
+          total_after = 0
+
+          optimized = 0
+          skipped = 0
+          failed = 0
+
+          print()
+          print("========================================")
+          print(" AUTOMATIC PNG COMPRESSION")
+          print("========================================")
+          print(f"PNG files found: {len(png_files)}")
+          print(f"Quality: {PNG_QUALITY}")
+          print(f"Minimum file size: {MIN_SIZE_MB} MiB")
+          print()
+
+          for path in png_files:
+
+              before = path.stat().st_size
+              total_before += before
+
+              # Skip small files, icons and logos.
+              if before < MIN_SIZE_MB * 1024 * 1024:
+                  total_after += before
+                  skipped += 1
+                  continue
+
+              result = subprocess.run(
+                  [
+                      "pngquant",
+                      "--quality=" + PNG_QUALITY,
+                      "--speed=" + PNG_SPEED,
+                      "--strip",
+                      "--skip-if-larger",
+                      "--force",
+                      "--ext=.png",
+                      "--",
+                      str(path),
+                  ],
+                  capture_output=True,
+                  text=True,
+              )
+
+              after = path.stat().st_size
+              total_after += after
+
+              if result.returncode == 0:
+
+                  optimized += 1
+
+                  reduction = (
+                      100.0 * (before - after) / before
+                  )
+
+                  print(
+                      f"{path.name}: "
+                      f"{before / 1024**2:.2f} MB -> "
+                      f"{after / 1024**2:.2f} MB "
+                      f"(-{reduction:.1f}%)"
+                  )
+
+              elif result.returncode in (98, 99):
+
+                  # pngquant decided not to overwrite the file,
+                  # because the quality or size constraints
+                  # could not be satisfied.
+                  skipped += 1
+
+                  print(f"Skipped: {path.name}")
+
+              else:
+
+                  # Preserve original PNG when optimization fails.
+                  failed += 1
+
+                  print(
+                      f"::warning::PNG optimization failed "
+                      f"for {path.name}: "
+                      f"{result.stderr.strip()}"
+                  )
+
+          saved = total_before - total_after
+
+          print()
+          print("========================================")
+          print(" PNG COMPRESSION SUMMARY")
+          print("========================================")
+
+          print(f"Optimized files: {optimized}")
+          print(f"Skipped files:   {skipped}")
+          print(f"Failed files:    {failed}")
+
+          print(
+              f"Total before: "
+              f"{total_before / 1024**2:.1f} MB"
+          )
+
+          print(
+              f"Total after:  "
+              f"{total_after / 1024**2:.1f} MB"
+          )
+
+          print(
+              f"Space saved:  "
+              f"{saved / 1024**2:.1f} MB"
+          )
+
+          if total_before > 0:
+
+              reduction = (
+                  100.0 * saved / total_before
+              )
+
+              print(
+                  f"Total reduction: {reduction:.1f}%"
+              )
+
+          print("========================================")
+          PY
+
+          echo ""
+          echo "Website size after PNG compression:"
+          du -sh site
+
+      # ==========================================================
+      # PUBLISH TO GITHUB PAGES
+      # ==========================================================
 
       - name: Configure Pages
         if: inputs.check_only != true
