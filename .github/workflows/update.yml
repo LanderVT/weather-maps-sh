@@ -24,7 +24,7 @@ concurrency:
 jobs:
   forecast:
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 75  # Extra time for PNG optimization.
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
@@ -39,7 +39,7 @@ jobs:
       HYBRID_ESRI_RELIEF: '1'
 
       # ECMWF: Alps + compact Benelux / medium mountains region.
-      ECMWF_AREAS: 'alps'
+      ECMWF_AREAS: 'alps,full'
       ECMWF_N_DAYS: '7'
       ECMWF_GRID_STEP_ALPS: '0.008'
       ECMWF_GRID_STEP_FULL: '0.01'
@@ -73,7 +73,8 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      # No apt-get: Python wheels include native geospatial libraries.
+      # Important: no apt-get. The Ubuntu package mirrors returned HTTP 503.
+      # Python wheels provide ecCodes, GEOS and PROJ binaries.
       - name: Install Python and geospatial libraries (no apt-get)
         shell: bash
         run: |
@@ -85,7 +86,6 @@ jobs:
             'cfgrib>=0.9.14,<1' \
             'Pillow>=10' \
             cartopy pyproj shapely
-
           python - <<'PY'
           import eccodes
           import cfgrib
@@ -93,11 +93,7 @@ jobs:
           import pyproj
           import shapely
           from PIL import Image
-
-          print(
-              'Python wheels: ecCodes, cfgrib, Cartopy, '
-              'PROJ, GEOS and Pillow OK'
-          )
+          print('Python wheels: ecCodes, cfgrib, Cartopy, PROJ, GEOS and Pillow OK')
           print('ecCodes API:', eccodes.codes_get_api_version())
           PY
 
@@ -107,17 +103,29 @@ jobs:
       - name: Verify dark map layout imports
         run: |
           python -m py_compile map_style_reference.py snow_dark_adapter.py
-
           python - <<'PYCODE'
           import map_style_reference as design
           import snow_dark_adapter as adapter
-
           assert design.RELIEF_THEME == 'slate'
           print('Dark/slate map layout installed for all model panels')
           PYCODE
 
+      # Regional table code does not alter the snow equations. The short
+      # CI-only hooks capture numeric arrays when each original map is plotted.
+      - name: Check Alpine snowfall tables
+        run: |
+          python -m py_compile alpine_snow_tables.py enable_alpine_capture.py
+          python alpine_snow_tables.py self-test
+
+      - name: Enable regional snowfall capture in the model scripts
+        if: inputs.check_only != true
+        run: python enable_alpine_capture.py
+
       - name: Generate Hybrid, ECMWF, ICON-D2 and ICON-CH2 maps and website
         if: inputs.check_only != true
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          SNOW_REGION_CACHE: ${{ github.workspace }}/_regional_snow_snapshots
         run: python run_forecast.py
 
       - name: Validate website before deployment
@@ -126,44 +134,34 @@ jobs:
           python - <<'PY'
           import json
           from pathlib import Path
-
           p = Path('site/status.json')
-
           if not p.is_file():
               raise SystemExit('No website status.json was generated')
-
           status = json.loads(p.read_text(encoding='utf-8'))
-
           for model in ('hybrid', 'ecmwf', 'icon_d2', 'icon_ch2'):
               entry = status['models'][model]
-              print(
-                  f"{model}: {entry['status']}, "
-                  f"{entry['map_count']} maps"
-              )
-
+              print(f"{model}: {entry['status']}, {entry['map_count']} maps")
           for model in ('hybrid', 'ecmwf'):
               if status['models'][model]['status'] != 'ok':
-                  raise SystemExit(
-                      f'Existing {model} forecast failed; '
-                      f'preserving previous website'
-                  )
-
+                  raise SystemExit(f'Existing {model} forecast failed; preserving previous website')
           if status['models']['icon_d2']['status'] != 'ok':
-              print(
-                  '::warning::ICON-D2 failed; '
-                  'only Hybrid and ECMWF will be updated'
-              )
-
+              print('::warning::ICON-D2 failed; only Hybrid and ECMWF will be updated')
           if status['models']['icon_ch2']['status'] != 'ok':
-              print(
-                  '::warning::ICON-CH2 failed; '
-                  'existing model tabs remain available'
-              )
+              print('::warning::ICON-CH2 failed; existing model tabs remain available')
           PY
-
           du -sh site
 
-      # Optional high-quality PNG optimizer, installed through pip.
+      # HTML + JSON with 3 separate altitude tables are added to the
+      # finished Pages site; missing regional fields never block maps.
+      - name: Build regional Alpine snowfall tables
+        if: inputs.check_only != true
+        continue-on-error: true
+        env:
+          SNOW_REGION_CACHE: ${{ github.workspace }}/_regional_snow_snapshots
+        run: python alpine_snow_tables.py build
+
+      # The high-quality imagequant wheel is optional: no apt dependency.
+      # If it cannot be installed, the next step falls back to Pillow.
       - name: Install optional high-quality PNG optimizer
         if: inputs.check_only != true
         continue-on-error: true
@@ -171,9 +169,6 @@ jobs:
         run: |
           python -m pip install --only-binary=:all: 'imagequant>=1.1.4,<2'
 
-      # Compress PNGs in the finished site directory.
-      # If imagequant is unavailable, use Pillow.
-      # A compression failure must never block publication.
       - name: Compress website PNG maps (optional, safe)
         if: inputs.check_only != true
         continue-on-error: true
@@ -192,58 +187,36 @@ jobs:
               engine = 'Pillow fallback (256 colors)'
 
           site = Path('site')
-
           if not site.is_dir():
-              print(
-                  '::warning::No site directory; '
-                  'skipping PNG optimization'
-              )
+              print('::warning::No site directory; skipping PNG optimization')
               raise SystemExit(0)
 
           files = sorted(site.rglob('*.png'))
-
-          # Only compress PNG files larger than 1 MiB.
-          threshold = 1 * 1024 * 1024
-
+          threshold = 1 * 1024 * 1024  # Only files >= 1 MiB
           before_total = 0
           after_total = 0
           optimized = 0
           skipped = 0
           failed = 0
 
-          print()
-          print('========================================')
-          print(' PNG OPTIMIZATION')
-          print('========================================')
-          print('Optimizer:', engine)
-          print('PNG files found:', len(files))
-          print()
+          print('PNG optimizer:', engine)
+          print('Found', len(files), 'PNG files')
 
           for path in files:
-
               before = path.stat().st_size
               before_total += before
-
               if before < threshold:
                   after_total += before
                   skipped += 1
                   continue
 
-              temporary = path.with_name(
-                  path.name + '.optimizing.png'
-              )
-
+              temporary = path.with_name(path.name + '.optimizing.png')
               try:
                   with Image.open(path) as original:
-
                       dimensions = original.size
-
                       if original.mode in ('P', 'L', '1'):
-                          # Re-encode indexed/grayscale files losslessly.
-                          result = original.copy()
-
+                          result = original.copy()  # Lossless re-encoding
                       elif imagequant is not None:
-                          # High-quality palette optimization.
                           result = imagequant.quantize_pil_image(
                               original.convert('RGBA'),
                               dithering_level=0.7,
@@ -251,96 +224,47 @@ jobs:
                               min_quality=80,
                               max_quality=95,
                           )
-
                       else:
-                          # Pillow fallback if imagequant is unavailable.
                           rgba = original.convert('RGBA')
                           result = rgba.quantize(
                               colors=256,
                               method=Image.Quantize.FASTOCTREE,
                           )
-
-                      result.save(
-                          temporary,
-                          format='PNG',
-                          optimize=True
-                      )
+                      result.save(temporary, format='PNG', optimize=True)
                       result.close()
 
-                  # Check the optimized PNG before replacing anything.
                   with Image.open(temporary) as check:
                       check.verify()
-
                   with Image.open(temporary) as check:
                       if check.size != dimensions:
-                          raise RuntimeError(
-                              'Image dimensions changed'
-                          )
+                          raise RuntimeError('Image dimensions changed')
 
                   after = temporary.stat().st_size
-
                   if after < before:
-
-                      # Replace the original only when the new file
-                      # is valid and actually smaller.
-                      temporary.replace(path)
+                      temporary.replace(path)  # Atomic replacement
                       optimized += 1
-
-                      reduction = (
-                          100 * (before - after) / before
-                      )
-
-                      print(
-                          f'{path.name}: '
-                          f'{before / 1048576:.2f} -> '
-                          f'{after / 1048576:.2f} MiB '
-                          f'(-{reduction:.0f}%)'
-                      )
-
+                      print(f'{path.name}: {before / 1048576:.2f} -> '
+                            f'{after / 1048576:.2f} MiB '
+                            f'(-{100 * (before - after) / before:.0f}%)')
                   else:
                       temporary.unlink()
                       skipped += 1
 
               except Exception as exc:
-
                   failed += 1
-                  print(
-                      f'::warning::PNG unchanged: '
-                      f'{path.name}: {exc}'
-                  )
-
+                  print(f'::warning::PNG unchanged: {path.name}: {exc}')
               finally:
                   temporary.unlink(missing_ok=True)
 
               after_total += path.stat().st_size
 
-          print()
-          print('========================================')
-          print(' PNG COMPRESSION SUMMARY')
-          print('========================================')
-
-          print(f'Optimized: {optimized}')
-          print(f'Skipped:   {skipped}')
-          print(f'Failed:    {failed}')
-
-          print(
-              f'Before: {before_total / 1048576:.1f} MiB'
-          )
-          print(
-              f'After:  {after_total / 1048576:.1f} MiB'
-          )
-          print(
-              f'Saved:  '
-              f'{(before_total - after_total) / 1048576:.1f} MiB'
-          )
-
+          print(f'Optimized: {optimized}, skipped: {skipped}, failed: {failed}')
+          print(f'Before: {before_total / 1048576:.1f} MiB; '
+                f'after: {after_total / 1048576:.1f} MiB; '
+                f'saved: {(before_total - after_total) / 1048576:.1f} MiB')
           if before_total:
-              print(
-                  f'Total reduction: '
-                  f'{100 * (before_total - after_total) / before_total:.1f}%'
-              )
+              print(f'Total reduction: {100 * (before_total-after_total)/before_total:.1f}%')
           PY
-
           du -sh site
 
       - name: Configure Pages
