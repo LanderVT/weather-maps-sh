@@ -1,3 +1,4 @@
+
 name: Update SnowHybrid + ECMWF + ICON-D2 + Alpine Snow Tables (hourly)
 
 # cron-job.org triggers POST /actions/workflows/update.yml/dispatches.
@@ -23,7 +24,8 @@ concurrency:
 jobs:
   forecast:
     runs-on: ubuntu-24.04
-    timeout-minutes: 75  # Extra time for PNG optimization.
+    timeout-minutes: 75
+
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
@@ -31,13 +33,17 @@ jobs:
     env:
       SNOW_MAP_THEME: 'slate'
 
-      # Hybrid: 48 h, 3-hour intervals (ICON-CH2 excluded as input).
+      # ===================================
+      # HYBRID: 48 HOURS, ALPS ONLY
+      # ===================================
       HYBRID_GRID_STEP: '0.008'
       HYBRID_DPI: '200'
       HYBRID_MIN_MODELS: '2'
       HYBRID_ESRI_RELIEF: '1'
 
-      # ECMWF: Alps only (no Benelux/full domain).
+      # ===================================
+      # ECMWF: 7 DAYS, ALPS ONLY
+      # ===================================
       ECMWF_AREAS: 'alps'
       ECMWF_N_DAYS: '7'
       ECMWF_GRID_STEP_ALPS: '0.008'
@@ -46,7 +52,9 @@ jobs:
       ECMWF_MAX_RUN_AGE_H: '24'
       ECMWF_ESRI_RELIEF: '1'
 
-      # Standalone ICON-D2: Alps only.
+      # ===================================
+      # ICON-D2: 48 HOURS, ALPS ONLY
+      # ===================================
       ICON_D2_AREAS: 'alps'
       ICON_D2_DPI: '200'
       ICON_D2_GRID_STEP_ALPS: '0.008'
@@ -54,10 +62,16 @@ jobs:
       ICON_D2_ESRI_RELIEF: '1'
       ICON_D2_MAX_RUN_AGE_H: '24'
 
-      # Standalone ICON-CH2 is disabled in the disposable Actions checkout.
+      # ===================================
+      # ICON-CH2: DISABLED
+      # ===================================
       SNOW_DISABLE_ICON_CH2: '1'
 
     steps:
+
+      # ===================================
+      # 1. CHECKOUT
+      # ===================================
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -67,19 +81,24 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      # Important: no apt-get. The Ubuntu package mirrors returned HTTP 503.
-      # Python wheels provide ecCodes, GEOS and PROJ binaries.
-      - name: Install Python and geospatial libraries (no apt-get)
+      # ===================================
+      # 2. INSTALL DEPENDENCIES
+      # No apt-get: avoids Ubuntu mirror errors.
+      # ===================================
+      - name: Install Python and geospatial libraries
         shell: bash
         run: |
           python -m pip install --upgrade pip
+
           python -m pip install --prefer-binary -r requirements.txt
+
           python -m pip install --only-binary=:all: \
             'eccodes>=2.43' \
             'eccodeslib>=2.43' \
             'cfgrib>=0.9.14,<1' \
             'Pillow>=10' \
             cartopy pyproj shapely
+
           python - <<'PY'
           import eccodes
           import cfgrib
@@ -87,35 +106,57 @@ jobs:
           import pyproj
           import shapely
           from PIL import Image
-          print('Python wheels: ecCodes, cfgrib, Cartopy, PROJ, GEOS and Pillow OK')
+
+          print(
+              'Python wheels: ecCodes, cfgrib, Cartopy, '
+              'PROJ, GEOS and Pillow OK'
+          )
           print('ecCodes API:', eccodes.codes_get_api_version())
           PY
 
-      # Make the temporary checkout ignore ICON-CH2 even in --check.
-      # Original repository files are NOT committed or changed permanently.
+      # ===================================
+      # 3. PREPARE MODELS AND TABLE CAPTURE
+      #
+      # Disable standalone ICON-CH2.
+      # Exclude ICON-CH2 as Hybrid input.
+      # Keep shared Hybrid plotting library.
+      # Enable numerical snowfall capture.
+      # ===================================
       - name: Prepare 3 forecast models and numeric captures
         run: python enable_alpine_capture.py
 
+      # ===================================
+      # 4. VERIFY SCRIPTS
+      # ===================================
       - name: Check all scripts and libraries
         run: python run_forecast.py --check
 
       - name: Verify dark map layout imports
         run: |
           python -m py_compile map_style_reference.py snow_dark_adapter.py
+
           python - <<'PYCODE'
           import map_style_reference as design
           import snow_dark_adapter as adapter
+
           assert design.RELIEF_THEME == 'slate'
-          print('Dark/slate map layout installed for all model panels')
+          print('Dark/slate map layout OK')
           PYCODE
 
-      # The complete self-test checks a real numerical capture and DEM match,
-      # not merely whether the HTML tables can be rendered.
+      # ===================================
+      # 5. CHECK ALPINE TABLE GENERATOR
+      # ===================================
       - name: Check Alpine snowfall tables
         run: |
-          python -m py_compile alpine_snow_tables.py enable_alpine_capture.py
+          python -m py_compile \
+            alpine_snow_tables.py \
+            enable_alpine_capture.py
+
           python alpine_snow_tables.py self-test
 
+      # ===================================
+      # 6. GENERATE FORECAST MAPS
+      # ===================================
       - name: Generate Hybrid, ECMWF and ICON-D2 maps and website
         if: inputs.check_only != true
         env:
@@ -123,49 +164,96 @@ jobs:
           SNOW_REGION_CACHE: ${{ github.workspace }}/_regional_snow_snapshots
         run: python run_forecast.py
 
+      # ===================================
+      # 7. VALIDATE WEBSITE
+      #
+      # Publish when at least one model
+      # has successfully generated maps.
+      # ===================================
       - name: Validate website before deployment
         if: inputs.check_only != true
         run: |
           python - <<'PY'
           import json
           from pathlib import Path
+
           p = Path('site/status.json')
+
           if not p.is_file():
-              raise SystemExit('No website status.json was generated')
-          status = json.loads(p.read_text(encoding='utf-8'))
+              raise SystemExit(
+                  'No website status.json was generated'
+              )
+
+          status = json.loads(
+              p.read_text(encoding='utf-8')
+          )
+
           succeeded = []
+
           for model in ('hybrid', 'icon_d2', 'ecmwf'):
+
               entry = status.get('models', {}).get(model, {})
               count = int(entry.get('map_count', 0))
               state = entry.get('status', 'missing')
-              print(f"{model}: {state}, {count} maps")
+
+              print(f'{model}: {state}, {count} maps')
+
               if state == 'ok' and count > 0:
                   succeeded.append(model)
+
               else:
-                  print(f'::warning::{model} is unavailable in this update')
+                  print(
+                      f'::warning::{model} unavailable '
+                      'in this update'
+                  )
+
           if not succeeded:
-              raise SystemExit('No successful snow model; preserving previous website')
-          print('Publishing successful model(s):', ', '.join(succeeded))
+              raise SystemExit(
+                  'No successful snow model; '
+                  'preserving previous website'
+              )
+
+          print(
+              'Publishing successful models:',
+              ', '.join(succeeded)
+          )
+
           print('Standalone ICON-CH2: disabled')
           PY
+
           du -sh site
 
-      # Separate Hybrid / ICON-D2 / ECMWF tables, only available days shown.
-      # Never demand a full 5-day period from a 48-hour model.
+      # ===================================
+      # 8. BUILD REGIONAL SNOW TABLES
+      #
+      # Fourth website tab:
+      # "Sneeuwtabellen"
+      #
+      # Hybrid: max. 2 available days
+      # ICON-D2: max. 2 available days
+      # ECMWF: max. 7 available days
+      #
+      # Separate tables:
+      # 1000 m, 1500 m, 2000 m
+      #
+      # Dolomites included.
+      # ===================================
       - name: Build available regional Alpine snowfall tables
         if: inputs.check_only != true
         env:
           SNOW_REGION_CACHE: ${{ github.workspace }}/_regional_snow_snapshots
         run: python alpine_snow_tables.py build
 
-      # The high-quality imagequant wheel is optional: no apt dependency.
-      # If it cannot be installed, the next step falls back to Pillow.
+      # ===================================
+      # 9. OPTIONAL PNG COMPRESSION
+      # ===================================
       - name: Install optional high-quality PNG optimizer
         if: inputs.check_only != true
         continue-on-error: true
         timeout-minutes: 3
         run: |
-          python -m pip install --only-binary=:all: 'imagequant>=1.1.4,<2'
+          python -m pip install --only-binary=:all: \
+            'imagequant>=1.1.4,<2'
 
       - name: Compress website PNG maps (optional, safe)
         if: inputs.check_only != true
@@ -180,17 +268,23 @@ jobs:
           try:
               import imagequant
               engine = 'imagequant (80-95 quality)'
+
           except ImportError:
               imagequant = None
               engine = 'Pillow fallback (256 colors)'
 
           site = Path('site')
+
           if not site.is_dir():
-              print('::warning::No site directory; skipping PNG optimization')
+              print(
+                  '::warning::No site directory; '
+                  'skipping PNG optimization'
+              )
               raise SystemExit(0)
 
           files = sorted(site.rglob('*.png'))
-          threshold = 1 * 1024 * 1024  # Only files >= 1 MiB
+          threshold = 1 * 1024 * 1024
+
           before_total = 0
           after_total = 0
           optimized = 0
@@ -201,19 +295,27 @@ jobs:
           print('Found', len(files), 'PNG files')
 
           for path in files:
+
               before = path.stat().st_size
               before_total += before
+
               if before < threshold:
                   after_total += before
                   skipped += 1
                   continue
 
-              temporary = path.with_name(path.name + '.optimizing.png')
+              temporary = path.with_name(
+                  path.name + '.optimizing.png'
+              )
+
               try:
                   with Image.open(path) as original:
+
                       dimensions = original.size
+
                       if original.mode in ('P', 'L', '1'):
-                          result = original.copy()  # Lossless re-encoding
+                          result = original.copy()
+
                       elif imagequant is not None:
                           result = imagequant.quantize_pil_image(
                               original.convert('RGBA'),
@@ -222,49 +324,99 @@ jobs:
                               min_quality=80,
                               max_quality=95,
                           )
+
                       else:
                           rgba = original.convert('RGBA')
+
                           result = rgba.quantize(
                               colors=256,
                               method=Image.Quantize.FASTOCTREE,
                           )
-                      result.save(temporary, format='PNG', optimize=True)
+
+                      result.save(
+                          temporary,
+                          format='PNG',
+                          optimize=True
+                      )
+
                       result.close()
 
+                  # Verify optimized PNG.
                   with Image.open(temporary) as check:
                       check.verify()
+
                   with Image.open(temporary) as check:
                       if check.size != dimensions:
-                          raise RuntimeError('Image dimensions changed')
+                          raise RuntimeError(
+                              'Image dimensions changed'
+                          )
 
                   after = temporary.stat().st_size
+
                   if after < before:
-                      temporary.replace(path)  # Atomic replacement
+
+                      temporary.replace(path)
                       optimized += 1
-                      print(f'{path.name}: {before / 1048576:.2f} -> '
-                            f'{after / 1048576:.2f} MiB '
-                            f'(-{100 * (before - after) / before:.0f}%)')
+
+                      reduction = (
+                          100 * (before - after) / before
+                      )
+
+                      print(
+                          f'{path.name}: '
+                          f'{before / 1048576:.2f} -> '
+                          f'{after / 1048576:.2f} MiB '
+                          f'(-{reduction:.0f}%)'
+                      )
+
                   else:
                       temporary.unlink()
                       skipped += 1
 
               except Exception as exc:
+
                   failed += 1
-                  print(f'::warning::PNG unchanged: {path.name}: {exc}')
+
+                  print(
+                      f'::warning::PNG unchanged: '
+                      f'{path.name}: {exc}'
+                  )
+
               finally:
                   temporary.unlink(missing_ok=True)
 
               after_total += path.stat().st_size
 
-          print(f'Optimized: {optimized}, skipped: {skipped}, failed: {failed}')
-          print(f'Before: {before_total / 1048576:.1f} MiB; '
-                f'after: {after_total / 1048576:.1f} MiB; '
-                f'saved: {(before_total - after_total) / 1048576:.1f} MiB')
+          print(
+              f'Optimized: {optimized}, '
+              f'skipped: {skipped}, '
+              f'failed: {failed}'
+          )
+
+          print(
+              f'Before: {before_total / 1048576:.1f} MiB; '
+              f'after: {after_total / 1048576:.1f} MiB; '
+              f'saved: '
+              f'{(before_total - after_total) / 1048576:.1f} MiB'
+          )
+
           if before_total:
-              print(f'Total reduction: {100 * (before_total-after_total)/before_total:.1f}%')
+
+              reduction = (
+                  100 * (before_total - after_total)
+                  / before_total
+              )
+
+              print(
+                  f'Total reduction: {reduction:.1f}%'
+              )
           PY
+
           du -sh site
 
+      # ===================================
+      # 10. GITHUB PAGES DEPLOYMENT
+      # ===================================
       - name: Configure Pages
         if: inputs.check_only != true
         uses: actions/configure-pages@v5
