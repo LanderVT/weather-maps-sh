@@ -1,5 +1,4 @@
-
-name: Update SnowHybrid + ECMWF + ICON-D2 + ICON-CH2 maps (hourly)
+name: Update SnowHybrid + ECMWF + ICON-D2 + Alpine Snow Tables (hourly)
 
 # cron-job.org triggers POST /actions/workflows/update.yml/dispatches.
 # Keep workflow_dispatch; no duplicate GitHub schedule is required.
@@ -18,7 +17,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: snowhybrid-ecmwf-icon-d2-icon-ch2-pages-v5
+  group: snowhybrid-ecmwf-icon-d2-pages-v6
   cancel-in-progress: false
 
 jobs:
@@ -32,13 +31,13 @@ jobs:
     env:
       SNOW_MAP_THEME: 'slate'
 
-      # Hybrid: 48 h, 3-hour intervals, 6 models.
+      # Hybrid: 48 h, 3-hour intervals (ICON-CH2 excluded as input).
       HYBRID_GRID_STEP: '0.008'
       HYBRID_DPI: '200'
       HYBRID_MIN_MODELS: '2'
       HYBRID_ESRI_RELIEF: '1'
 
-      # ECMWF: Alps + compact Benelux / medium mountains region.
+      # ECMWF: Alps only (no Benelux/full domain).
       ECMWF_AREAS: 'alps'
       ECMWF_N_DAYS: '7'
       ECMWF_GRID_STEP_ALPS: '0.008'
@@ -55,13 +54,8 @@ jobs:
       ICON_D2_ESRI_RELIEF: '1'
       ICON_D2_MAX_RUN_AGE_H: '24'
 
-      # Standalone ICON-CH2-EPS control run: Alps, 5 days.
-      ICON_CH2_DAYS: '5'
-      ICON_CH2_STEP_HOURS: '6'
-      ICON_CH2_GRID_STEP_ALPS: '0.012'
-      ICON_CH2_DPI: '200'
-      ICON_CH2_MAX_RUN_AGE_H: '24'
-      ICON_CH2_ESRI_RELIEF: '1'
+      # Standalone ICON-CH2 is disabled in the disposable Actions checkout.
+      SNOW_DISABLE_ICON_CH2: '1'
 
     steps:
       - name: Checkout
@@ -97,6 +91,11 @@ jobs:
           print('ecCodes API:', eccodes.codes_get_api_version())
           PY
 
+      # Make the temporary checkout ignore ICON-CH2 even in --check.
+      # Original repository files are NOT committed or changed permanently.
+      - name: Prepare 3 forecast models and numeric captures
+        run: python enable_alpine_capture.py
+
       - name: Check all scripts and libraries
         run: python run_forecast.py --check
 
@@ -110,18 +109,14 @@ jobs:
           print('Dark/slate map layout installed for all model panels')
           PYCODE
 
-      # Regional table code does not alter the snow equations. The short
-      # CI-only hooks capture numeric arrays when each original map is plotted.
+      # The complete self-test checks a real numerical capture and DEM match,
+      # not merely whether the HTML tables can be rendered.
       - name: Check Alpine snowfall tables
         run: |
           python -m py_compile alpine_snow_tables.py enable_alpine_capture.py
           python alpine_snow_tables.py self-test
 
-      - name: Enable regional snowfall capture in the model scripts
-        if: inputs.check_only != true
-        run: python enable_alpine_capture.py
-
-      - name: Generate Hybrid, ECMWF, ICON-D2 and ICON-CH2 maps and website
+      - name: Generate Hybrid, ECMWF and ICON-D2 maps and website
         if: inputs.check_only != true
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -138,24 +133,27 @@ jobs:
           if not p.is_file():
               raise SystemExit('No website status.json was generated')
           status = json.loads(p.read_text(encoding='utf-8'))
-          for model in ('hybrid', 'ecmwf', 'icon_d2', 'icon_ch2'):
-              entry = status['models'][model]
-              print(f"{model}: {entry['status']}, {entry['map_count']} maps")
-          for model in ('hybrid', 'ecmwf'):
-              if status['models'][model]['status'] != 'ok':
-                  raise SystemExit(f'Existing {model} forecast failed; preserving previous website')
-          if status['models']['icon_d2']['status'] != 'ok':
-              print('::warning::ICON-D2 failed; only Hybrid and ECMWF will be updated')
-          if status['models']['icon_ch2']['status'] != 'ok':
-              print('::warning::ICON-CH2 failed; existing model tabs remain available')
+          succeeded = []
+          for model in ('hybrid', 'icon_d2', 'ecmwf'):
+              entry = status.get('models', {}).get(model, {})
+              count = int(entry.get('map_count', 0))
+              state = entry.get('status', 'missing')
+              print(f"{model}: {state}, {count} maps")
+              if state == 'ok' and count > 0:
+                  succeeded.append(model)
+              else:
+                  print(f'::warning::{model} is unavailable in this update')
+          if not succeeded:
+              raise SystemExit('No successful snow model; preserving previous website')
+          print('Publishing successful model(s):', ', '.join(succeeded))
+          print('Standalone ICON-CH2: disabled')
           PY
           du -sh site
 
-      # HTML + JSON with 3 separate altitude tables are added to the
-      # finished Pages site; missing regional fields never block maps.
-      - name: Build regional Alpine snowfall tables
+      # Separate Hybrid / ICON-D2 / ECMWF tables, only available days shown.
+      # Never demand a full 5-day period from a 48-hour model.
+      - name: Build available regional Alpine snowfall tables
         if: inputs.check_only != true
-        continue-on-error: true
         env:
           SNOW_REGION_CACHE: ${{ github.workspace }}/_regional_snow_snapshots
         run: python alpine_snow_tables.py build
