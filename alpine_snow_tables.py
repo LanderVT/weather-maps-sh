@@ -3,7 +3,8 @@
 The optional matplotlib capture hook records numerical snowfall fields *during*
 existing map rendering. This avoids OCR / inferring values from map colours and
 avoids downloading GRIB files a second time. Post-processing builds a standalone
-JSON data file plus three HTML tables (1000, 1500, 2000 m).
+JSON data file plus three HTML tables (1000, 1500, 2000 m), including
+an indicative period-total column for each model.
 
 Model fields and elevations must be aligned. If this cannot be demonstrated,
 we publish missing data, never guessed numerical snowfall.
@@ -496,34 +497,73 @@ def _local_hours_overlap(start, end, day):
 
 
 def model_daily_stats(records, date, region_id, altitude):
-    """Time-weighted q25/q75 within a local day, using source plot intervals.
+    """Aggregate only UNIQUE forecast hours within one Belgian calendar day.
 
-    When an original plot covers multiple local dates, snowfall is allocated
-    proportionally to interval overlap (explicit approximation).
+    Several plotting hooks can record the same interval twice, or a cumulative
+    0-48h map in addition to the individual daily maps. The old implementation
+    counted all intervals and rejected days with >26 hours, which could hide
+    Saturday between Friday and Sunday. For each distinct time segment we now
+    choose the SHORTEST source interval covering it, so a 0-48h cumulative
+    map cannot double-count daily maps. As before, an interval crossing a local
+    midnight is distributed uniformly by its overlapping hours; no new
+    meteorological calculation is introduced.
     """
-    lo = hi = coverage = 0.0
-    intervals = []
+    day_start = datetime.combine(date, clocktime.min, tzinfo=LOCAL_TZ).astimezone(timezone.utc)
+    day_end = datetime.combine(date + timedelta(days=1), clocktime.min,
+                               tzinfo=LOCAL_TZ).astimezone(timezone.utc)
+
+    sources = []
+    boundaries = {day_start, day_end}
     for row in records:
-        stats = row.get("statistics", {}).get(region_id, {}).get(str(altitude))
+        stats = row.get('statistics', {}).get(region_id, {}).get(str(altitude))
         if not stats:
             continue
-        start = datetime.fromisoformat(row["start_utc"])
-        end = datetime.fromisoformat(row["end_utc"])
-        length_h = (end - start).total_seconds() / 3600
-        if length_h <= 0:
+        try:
+            start = datetime.fromisoformat(row['start_utc']).astimezone(timezone.utc)
+            end = datetime.fromisoformat(row['end_utc']).astimezone(timezone.utc)
+            duration = (end - start).total_seconds()
+            if duration <= 0:
+                continue
+            left = max(start, day_start)
+            right = min(end, day_end)
+            if right <= left:
+                continue
+            low, high = float(stats['q25']), float(stats['q75'])
+            if not all(map(math.isfinite, (low, high))):
+                continue
+        except (TypeError, ValueError, KeyError, AttributeError):
             continue
-        hours = _local_hours_overlap(start, end, date)
-        if hours <= 0:
-            continue
-        frac = hours / length_h
-        lo += stats["q25"] * frac
-        hi += stats["q75"] * frac
-        coverage += hours
-        intervals.append(row["file"])
-    # Partial forecast days are allowed. Mark their actual hourly coverage.
-    if coverage < 3 or coverage > 26:
+        sources.append((start, end, duration, low, high, str(row.get('file', ''))))
+        boundaries.update((left, right))
+
+    if not sources:
         return None
-    return {"q25": lo, "q75": hi, "coverage_hours": round(coverage, 1), "files": intervals}
+
+    lo = hi = coverage_seconds = 0.0
+    used = set()
+    ordered = sorted(boundaries)
+    for left, right in zip(ordered, ordered[1:]):
+        segment_seconds = (right - left).total_seconds()
+        if segment_seconds <= 0:
+            continue
+        candidates = [r for r in sources if r[0] <= left and r[1] >= right]
+        if not candidates:
+            continue
+        # Prefer individual/day maps over a 0-48h cumulative map; if two
+        # capture hooks saved the same interval, only one contributes.
+        source = min(candidates, key=lambda r: (r[2], r[0], r[5]))
+        portion = segment_seconds / source[2]
+        lo += source[3] * portion
+        hi += source[4] * portion
+        coverage_seconds += segment_seconds
+        used.add(source[5])
+
+    coverage = coverage_seconds / 3600.0
+    expected_day_hours = (day_end - day_start).total_seconds() / 3600.0
+    if coverage < 3.0 or coverage > expected_day_hours + 0.01:
+        return None
+    return {'q25': lo, 'q75': hi,
+            'coverage_hours': round(coverage, 1), 'files': sorted(used)}
 
 
 def _range_text(lo, hi):
@@ -537,6 +577,49 @@ def _range_text(lo, hi):
     if a >= b:
         b = a + step
     return f"{a}–{b}"
+
+
+def _sum_visible_day_ranges(cells, indices):
+    """Indicative snowfall range across precisely the displayed calendar days.
+
+    Source snapshots currently contain regional daily quantiles, not the full
+    per-pixel cumulative field. Summing lower/upper daily quantiles therefore
+    gives an *indicative* period range, not the spatial q25/q75 of accumulated
+    snow. Missing days must not silently be treated as zero snowfall.
+    """
+    unavailable = {"available": False, "range_cm": "–"}
+    if not indices:
+        return unavailable
+
+    daily = []
+    for i in indices:
+        if not isinstance(i, int) or i < 0 or i >= len(cells):
+            return unavailable
+        cell = cells[i]
+        if not cell.get("available"):
+            return unavailable
+        try:
+            lo = float(cell["low_cm"])
+            hi = float(cell["high_cm"])
+        except (KeyError, TypeError, ValueError):
+            return unavailable
+        if not (math.isfinite(lo) and math.isfinite(hi) and 0 <= lo <= hi):
+            return unavailable
+        daily.append(cell)
+
+    low = sum(float(c["low_cm"]) for c in daily)
+    high = sum(float(c["high_cm"]) for c in daily)
+    partial = any(bool(c.get("partial")) for c in daily)
+    return {
+        "available": True,
+        "range_cm": _range_text(low, high),
+        "low_cm": round(low, 1),
+        "high_cm": round(high, 1),
+        "coverage_hours": round(sum(float(c.get("coverage_hours", 0)) for c in daily), 1),
+        "partial": partial,
+        "day_count": len(daily),
+        "method": "indicative_sum_of_daily_regional_q25_q75",
+    }
 
 
 def build_summary(now_utc: datetime | None = None):
@@ -576,12 +659,17 @@ def build_summary(now_utc: datetime | None = None):
         "method": (
             "Afzonderlijke modellen (Hybrid, ICON-D2 en ECMWF); geen menging. "
             "Ruimtelijke 25e–75e percentielen binnen +/-100 m van de aangegeven hoogte. "
+            "Overlappende dag- en cumulatieve kaartintervallen worden niet dubbel geteld. "
             "Dagtotalen zijn benaderingen indien modelkaart-intervallen niet met kalenderdagen "
             "samenvallen. Gedeeltelijke dagen zijn als zodanig aangeduid; geen volledige 24u-som. "
+            "De totaalkolom is de som van de dagpercentielen over uitsluitend de "
+            "weergegeven datums (indicatief; niet het percentiel van het totale rasterveld). "
+            "Ontbrekende dagcellen geven geen volledig cumulatief totaal. "
             "Regiogrenzen zijn benaderde Alpenpolygonen."
         ),
         "data": {},
         "available_day_indices": {},
+        "totals": {},  # model -> region -> altitude -> total over displayed dates
     }
     for model in MODEL_LABELS:
         model_data = {}
@@ -606,11 +694,27 @@ def build_summary(now_utc: datetime | None = None):
                     })
                 model_data[region_id][str(alt)] = cells
         summary["data"][model] = model_data
-        # Only display the first two available calendar dates for the
-        # short-range models, and at most seven for ECMWF. This is a display
-        # constraint, not a fabricated extension of the model forecast.
-        indices = sorted(day_available)[:MODEL_MAX_DISPLAY_DAYS[model]]
+        # Never skip a calendar day to fill the two forecast columns. A
+        # 48-hour run started Friday can touch Friday, Saturday and Sunday;
+        # showing Friday and Sunday with Saturday missing was misleading.
+        # Display consecutive dates from the first through the last observed
+        # date, capped at two days (Hybrid / ICON-D2) or seven (ECMWF).
+        # Missing interior dates get an explicit dash rather than disappearing.
+        observed = sorted(day_available)
+        if observed:
+            first = observed[0]
+            last = min(observed[-1], first + MODEL_MAX_DISPLAY_DAYS[model] - 1)
+            indices = list(range(first, last + 1))
+        else:
+            indices = []
         summary["available_day_indices"][model] = indices
+        summary["totals"][model] = {
+            region_id: {
+                str(alt): _sum_visible_day_ranges(model_data[region_id][str(alt)], indices)
+                for alt in ALTITUDES
+            }
+            for region_id, _label, _poly in REGIONS
+        }
     return summary
 
 
@@ -632,6 +736,8 @@ HTML_STYLES = r"""
 #alpine-snow-tables th:first-child,#alpine-snow-tables td:first-child{text-align:left;position:sticky;left:0;z-index:1;background:#1a293c;min-width:185px}
 #alpine-snow-tables th:first-child {background:#243248;z-index:2}
 #alpine-snow-tables tr:last-child td {border-bottom:0}
+#alpine-snow-tables th.as-total,#alpine-snow-tables td.as-total {background:#253e58;border-left:2px solid #7188a8;font-weight:750}
+#alpine-snow-tables tbody tr:hover td.as-total {background:#385674}
 #alpine-snow-tables tbody tr:hover td {background:#263b54}
 #alpine-snow-tables td.as-none {color:#8391a6}
 #alpine-snow-tables td.as-light {color:#c6ddf3}
@@ -669,6 +775,7 @@ def render_table_section(summary):
     altitudes = summary.get("altitudes_m") or list(ALTITUDES)
     available = summary.get("available_day_indices") or {}
     table_data = summary.get("data") or {}
+    totals = summary.get("totals") or {}
 
     def short_date(ymd):
         day = datetime.strptime(ymd, "%Y-%m-%d")
@@ -722,6 +829,11 @@ def render_table_section(summary):
                     f'<th scope="col">{escape(short_date(date_list[i]))}</th>'
                     for i in indices
                 )
+                col_heads += (
+                    '<th scope="col" class="as-total" '
+                    'title="Indicatieve som van de getoonde dagen, in cm">'
+                    'Totaal</th>'
+                )
                 rows = []
                 for region in regions:
                     values = (table_data.get(model, {}).get(region['id'], {})
@@ -745,11 +857,31 @@ def render_table_section(summary):
                             f'<td class="{css_class}" title="{escape(tooltip, quote=True)}">'
                             f'{escape(str(amount))}{"*" if partial else ""}</td>'
                         )
+                    period = (totals.get(model, {}).get(region['id'], {})
+                              .get(str(altitude), {}))
+                    total_ok = bool(period.get('available'))
+                    total_high = period.get('high_cm')
+                    total_class = ('as-none' if not total_ok else
+                                   'as-heavy' if isinstance(total_high, (int, float)) and total_high >= 30 else
+                                   'as-medium' if isinstance(total_high, (int, float)) and total_high >= 10 else
+                                   'as-light')
+                    total_partial = total_ok and bool(period.get('partial'))
+                    total_title = (
+                        f'Indicatieve som van {period.get("day_count", len(indices))} getoonde dagranges; '
+                        'niet het percentiel van een cumulatief rasterveld'
+                        + ('; bevat een gedeeltelijke dag' if total_partial else '')
+                    ) if total_ok else 'Geen volledig totaal: minstens één dag heeft onvoldoende gegevens'
+                    cols.append(
+                        f'<td class="as-total {total_class}" '
+                        f'title="{escape(total_title, quote=True)}">'
+                        f'{escape(str(period.get("range_cm", "–")))}'
+                        f'{"*" if total_partial else ""}</td>'
+                    )
                     rows.append(
                         f'<tr><td>{escape(str(region["name"]))}</td>{"".join(cols)}</tr>'
                     )
                 body += (
-                    f'<h3 class="as-alt">{escape(str(altitude))} m hoogte · cm per dag</h3>'
+                    f'<h3 class="as-alt">{escape(str(altitude))} m hoogte · cm per dag + totaal</h3>'
                     '<div class="as-scroll"><table><thead><tr>'
                     f'<th scope="col">Regio</th>{col_heads}</tr></thead>'
                     f'<tbody>{"".join(rows)}</tbody></table></div>'
@@ -770,8 +902,11 @@ def render_table_section(summary):
         '<div class="as-switcher" role="group" aria-label="Kies een weermodel">'
         + ''.join(choices) + ''.join(views) + '</div>'
         '<p class="as-foot">Ranges: 25e–75e percentiel van de sneeuwval '
-        'in de regio op de gekozen hoogte (±100 m). Een * betekent '
-        'gedeeltelijke dag; – betekent onvoldoende gegevens, niet 0 cm. '
+        'in de regio op de gekozen hoogte (±100 m). <strong>Totaal</strong> '
+        'is de indicatieve som van de dagranges over de getoonde datums; '
+        'dit is niet exact het percentiel van de gecumuleerde sneeuwkaart. '
+        'Een * betekent dat minstens één dag gedeeltelijk is; '
+        '– betekent onvoldoende gegevens (niet 0 cm). '
         'Regiogrenzen zijn indicatief.</p>'
         '</div></section>'
     )
@@ -992,6 +1127,15 @@ def self_test():
         assert len(summary['available_day_indices']['hybrid']) == 2
         assert len(summary['available_day_indices']['ecmwf']) == 7
         assert set(summary['models_found']) == {'hybrid','icon_d2','ecmwf'}
+        # Model-specific totals over only the *visible* dates.
+        assert summary['totals']['icon_d2']['dolomites']['1500']['range_cm'] == '0–5'
+        assert summary['totals']['hybrid']['dolomites']['1500']['range_cm'] == '20–40'
+        assert summary['totals']['ecmwf']['dolomites']['1500']['range_cm'] == '170–320'
+        assert summary['totals']['hybrid']['dolomites']['1500']['day_count'] == 2
+        assert summary['totals']['ecmwf']['dolomites']['1500']['day_count'] == 7
+        assert summary['totals']['hybrid']['bern']['1500']['range_cm'] == '–'
+        assert _sum_visible_day_ranges([{'available': True,'low_cm':2,'high_cm':5}], [0,1])['range_cm'] == '–'
+        assert _sum_visible_day_ranges([{'available': True,'low_cm':3,'high_cm':4,'partial':True}], [0])['partial']
         assert summary['data']['icon_d2']['dolomites']['1500'][0]['available']
         assert summary['data']['ecmwf']['dolomites']['1500'][6]['available']
         assert summary['data']['icon_d2']['dolomites']['1500'][0]['range_cm'] == '0–5'
@@ -1054,6 +1198,8 @@ function selectModel(model) {
         assert 'as-choice-ecmwf:checked ~ .as-model-ecmwf' in page
         assert 'alpine_snow_tables.js' not in page
         assert '10–20' in page and '25–45' in page and '0–5' in page
+        assert page.count('class="as-total"') == 9  # 3 models x 3 altitude table headers
+        assert '20–40' in page and '170–320' in page
         assert page.count('id="panel-tables"') == 1
         assert page.count("['hybrid','ecmwf','icon_d2','tables']") == 2
         assert page.count('data-model="tables"') == 1
@@ -1070,6 +1216,48 @@ function selectModel(model) {
         assert (fake/'hide_icon_ch2.js').is_file()
         assert 'icon_ch2' not in json.loads((fake/'regional_snowfall.json').read_text()).get('models_found', {})
         print('Alpen-tabellen: vierde website-tab getest; geen duplicaten')
+    # Regression: previously a Friday-Sunday 0-48h cumulative map plus
+    # Friday/Saturday individual maps caused Saturday coverage=48h (>26),
+    # so the website showed Friday + Sunday instead of Friday + Saturday.
+    with TemporaryDirectory() as td:
+        previous = CACHE
+        CACHE = Path(td) / 'dup_intervals'
+        CACHE.mkdir()
+        run = datetime(2026, 11, 20, 6, tzinfo=timezone.utc)
+        for start_h, end_h, low, high in (
+            (6, 24, 5.0, 10.0),
+            (24, 48, 7.0, 15.0),
+            (6, 48, 12.0, 25.0),  # cumulative; MUST NOT be added twice
+        ):
+            record = {
+                'model': 'icon_d2', 'run_utc': run.isoformat(),
+                'start_utc': (run + timedelta(hours=start_h)).isoformat(),
+                'end_utc': (run + timedelta(hours=end_h)).isoformat(),
+                'file': f'icon_d2_{start_h}-{end_h}.png',
+                'statistics': {'dolomites': {'1500': {
+                    'q25': low, 'median': (low + high) / 2,
+                    'q75': high, 'pixels': 200}}},
+            }
+            (CACHE / f'icon_d2_{start_h}-{end_h}.json').write_text(json.dumps(record))
+        fri = model_daily_stats(
+            [json.loads(p.read_text()) for p in CACHE.glob('*.json')],
+            datetime(2026, 11, 20).date(), 'dolomites', 1500)
+        sat = model_daily_stats(
+            [json.loads(p.read_text()) for p in CACHE.glob('*.json')],
+            datetime(2026, 11, 21).date(), 'dolomites', 1500)
+        sun = model_daily_stats(
+            [json.loads(p.read_text()) for p in CACHE.glob('*.json')],
+            datetime(2026, 11, 22).date(), 'dolomites', 1500)
+        assert fri is not None and sat is not None and sun is not None
+        assert sat['coverage_hours'] == 24.0, sat
+        check = build_summary(datetime(2026, 11, 20, 12, tzinfo=timezone.utc))
+        dates_displayed = [check['dates'][i] for i in check['available_day_indices']['icon_d2']]
+        assert dates_displayed == ['2026-11-20', '2026-11-21'], dates_displayed
+        assert check['data']['icon_d2']['dolomites']['1500'][1]['available']
+        print('Alpen-tabellen: 0-48h cumulatief dubbel tellen voorkomen; '
+              'vrijdag + zaterdag OK (24 u zaterdag)')
+        CACHE = previous
+
     print('Alpen-tabellen self-test OK')
 
 
