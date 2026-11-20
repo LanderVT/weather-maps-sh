@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone, time as clocktime
 from functools import lru_cache
+from html import escape
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import argparse
@@ -638,78 +639,143 @@ HTML_STYLES = r"""
 #alpine-snow-tables td.as-heavy {color:#ffdf91;font-weight:750}
 #alpine-snow-tables .as-foot {font-size:.78rem;color:#a7b6c9;margin-top:14px}
 #alpine-snow-tables .as-badge {display:inline-block;border:1px solid #49617d;border-radius:7px;color:#c9daea;padding:3px 7px;font-size:.72rem;margin-left:5px;vertical-align:middle}
+/* Native model selection: no JavaScript, no fetch, no stale JS cache. */
+#alpine-snow-tables .as-switcher {display:flex;flex-wrap:wrap;gap:9px;margin-top:14px;align-items:center}
+#alpine-snow-tables .as-model-radio {position:absolute;width:1px;height:1px;opacity:0;overflow:hidden;clip-path:inset(50%)}
+#alpine-snow-tables .as-switcher label.as-tab {display:inline-flex;align-items:center;justify-content:center;min-height:42px;user-select:none;cursor:pointer}
+#alpine-snow-tables .as-model-radio:checked + label.as-tab {background:#e3edf8;color:#182639;border-color:#dbe8f8;font-weight:750}
+#alpine-snow-tables .as-model-radio:focus-visible + label.as-tab {outline:3px solid #8accff;outline-offset:2px}
+#alpine-snow-tables .as-model-view {display:none;flex:0 0 100%;width:100%;min-width:0;margin:8px 0 0}
+#alpine-snow-tables #as-choice-hybrid:checked ~ .as-model-hybrid,
+#alpine-snow-tables #as-choice-icon_d2:checked ~ .as-model-icon_d2,
+#alpine-snow-tables #as-choice-ecmwf:checked ~ .as-model-ecmwf {display:block}
+#alpine-snow-tables .as-empty {padding:14px 16px;background:#25344b;border:1px solid #485b76;border-radius:10px}
 /* Hide any legacy ICON-CH2 panels with predictable IDs or data-model attributes. */
 #tab-icon_ch2,#tab-icon-ch2,#panel-icon_ch2,#panel-icon-ch2,[data-model="icon_ch2"],[data-model="icon-ch2"]{display:none!important}
 </style>
 """
-HTML_SECTION = r"""
-<section id="alpine-snow-tables" aria-label="Sneeuwverwachting per Alpenregio">
- <div class="as-panel">
-  <h2>❄️ Sneeuwverwachting per Alpenregio <span class="as-badge">ECMWF tot 7 dagen</span></h2>
-  <p>Kies een model. Hybrid en ICON-D2 tonen maximaal twee beschikbare kalenderdagen; ECMWF maximaal zeven. De drie hoogtes staan apart en gebruiken uitsluitend daadwerkelijk beschikbare sneeuwvelden.</p>
-  <div id="as-dynamic"><p>Regionale sneeuwverwachting wordt geladen…</p></div>
-  <p class="as-foot">Ranges: 25e–75e percentiel van de sneeuwval in de regio op de gekozen hoogte (±100 m). Dagen met minder dan 23 uur aan modeldata zijn gedeeltelijke dagtotalen. Regiogrenzen zijn indicatief. ‘–’ betekent onvoldoende gegevens, niet 0 cm.</p>
- </div>
-</section>
-"""
-JS_TABLE = r"""(() => {
-  const target = document.querySelector('#as-dynamic');
-  if (!target) return;
-  const esc = x => String(x).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const datefmt = new Intl.DateTimeFormat('nl-BE',{weekday:'short',day:'2-digit',month:'2-digit',timeZone:'Europe/Brussels'});
-  const names = {hybrid:'Hybrid',icon_d2:'ICON-D2',ecmwf:'ECMWF'};
-  const order = ['hybrid','icon_d2','ecmwf'];
-  function fill(data) {
-    const usable = order.filter(m => (data.available_day_indices?.[m]||[]).length > 0);
-    if (!usable.length) {
-      target.textContent = 'Er zijn momenteel geen regionale sneeuwvelden beschikbaar.';
-      return;
-    }
-    const time = data.generated_at_utc ? new Date(data.generated_at_utc).toLocaleString('nl-BE',
-      {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Brussels'}) : '';
-    target.innerHTML = '<div class="as-tabs" role="tablist" aria-label="Weermodel">'+
-      usable.map(m => '<button type="button" class="as-tab" role="tab" data-snow-model="'+m+'" aria-selected="false">'+esc(names[m])+'</button>').join('')+
-      '</div><div id="as-model-details" aria-live="polite"></div>';
-    const details = target.querySelector('#as-model-details');
-    function render(model) {
-      for (const b of target.querySelectorAll('[data-snow-model]')) {
-        b.setAttribute('aria-selected', String(b.getAttribute('data-snow-model') === model));
-      }
-      const indices = data.available_day_indices[model] || [];
-      const headings = indices.map(i => datefmt.format(new Date(data.dates[i]+'T12:00:00Z')));
-      const regionRows = data.regions || [];
-      const tables = (data.altitudes_m||[]).map(alt => {
-        const body = regionRows.map(reg => {
-          const cells = data.data?.[model]?.[reg.id]?.[String(alt)] || [];
-          return '<tr><td>'+esc(reg.name)+'</td>'+
-            indices.map(i => {
-              const c = cells[i] || {range_cm:'–',available:false};
-              const text = c.available ? c.range_cm : '–';
-              const strength = !c.available ? 'as-none' : c.high_cm >= 30 ? 'as-heavy' : c.high_cm >= 10 ? 'as-medium' : 'as-light';
-              const coverage = c.available ? (' · '+c.coverage_hours+' uur') : '';
-              const title = c.available ? (c.partial ? 'Gedeeltelijke dag'+coverage : 'Dagberekening'+coverage) : 'Geen data voor deze regio/hoogte';
-              return '<td class="'+strength+'" title="'+esc(title)+'">'+esc(text)+(c.available && c.partial ? '*' : '')+'</td>';
-            }).join('')+'</tr>';
-        }).join('');
-        return '<h3 class="as-alt">'+alt+' m hoogte · cm per dag</h3><div class="as-scroll">'+
-          '<table><thead><tr><th scope="col">Regio</th>'+headings.map(h=>'<th scope="col">'+esc(h)+'</th>').join('')+
-          '</tr></thead><tbody>'+body+'</tbody></table></div>';
-      }).join('');
-      const horizonText = model === 'ecmwf' ? 'maximaal 7 dagen' : 'maximaal 2 dagen';
-      details.innerHTML = '<p>'+esc(names[model])+' · '+indices.length+' beschikbare dag(en) ('+horizonText+') · bijgewerkt '+esc(time)+
-          '. Een * duidt een gedeeltelijke dag aan.</p>'+tables;
-    }
-    for (const b of target.querySelectorAll('[data-snow-model]')) {
-      b.addEventListener('click', () => render(b.getAttribute('data-snow-model')));
-    }
-    render(usable[0]);
-  }
-  fetch('regional_snowfall.json', {cache:'no-store'})
-    .then(r=>{if(!r.ok)throw Error('Geen JSON');return r.json()})
-    .then(fill)
-    .catch(()=>target.textContent='Regionale sneeuwverwachting tijdelijk niet beschikbaar.');
-})();
-"""
+def render_table_section(summary):
+    """Render each model table into HTML at build time.
+
+    Native radio buttons switch models without JavaScript.  In particular,
+    they keep working when GitHub Pages/browser caches stale JS, when fetch()
+    is unavailable, or when only one model supplied usable data.  Three
+    choices are *always* visible; missing models explicitly say so.
+    """
+    names = MODEL_LABELS
+    order = ("hybrid", "icon_d2", "ecmwf")
+    date_list = summary.get("dates") or []
+    regions = summary.get("regions") or []
+    altitudes = summary.get("altitudes_m") or list(ALTITUDES)
+    available = summary.get("available_day_indices") or {}
+    table_data = summary.get("data") or {}
+
+    def short_date(ymd):
+        day = datetime.strptime(ymd, "%Y-%m-%d")
+        weekdays = ("ma", "di", "wo", "do", "vr", "za", "zo")
+        return f"{weekdays[day.weekday()]} {day:%d/%m}"
+
+    if summary.get("generated_at_utc"):
+        try:
+            updated = datetime.fromisoformat(summary["generated_at_utc"])
+            updated_str = updated.astimezone(LOCAL_TZ).strftime("%d/%m %H:%M")
+        except (ValueError, TypeError):
+            updated_str = "onbekend"
+    else:
+        updated_str = "onbekend"
+
+    # Keep the native input and its visible label as siblings of the output
+    # elements, making the CSS sibling selectors reliable in every browser.
+    selected_model = next((m for m in order if available.get(m)), order[0])
+    choices = []
+    for model in order:
+        count = len(available.get(model, []))
+        label = f"{names[model]}" + (f" ({count} d)" if count else " (geen data)")
+        choices.append(
+            f'<input class="as-model-radio" type="radio" name="as-active-model" '
+            f'id="as-choice-{model}" value="{model}"'
+            + (' checked' if model == selected_model else '') + '>\n'
+            + f'<label class="as-tab" for="as-choice-{model}">{escape(label)}</label>'
+        )
+
+    views = []
+    for model in order:
+        indices = [i for i in available.get(model, [])
+                   if isinstance(i, int) and 0 <= i < len(date_list)]
+        indices = indices[:MODEL_MAX_DISPLAY_DAYS[model]]
+        if not indices:
+            body = (
+                f'<p class="as-empty">Voor {escape(names[model])} zijn in deze run '
+                'geen regionale sneeuwvelden beschikbaar. De andere modellen '
+                'kunnen wel gegevens bevatten.</p>'
+            )
+        else:
+            horizon = 7 if model == 'ecmwf' else 2
+            body = (
+                f'<p><strong>{escape(names[model])}</strong> · '
+                f'{len(indices)} beschikbare dag(en) (maximaal {horizon}) · '
+                f'bijgewerkt {escape(updated_str)}. '
+                'Een * duidt een gedeeltelijke dag aan.</p>'
+            )
+            for altitude in altitudes:
+                col_heads = ''.join(
+                    f'<th scope="col">{escape(short_date(date_list[i]))}</th>'
+                    for i in indices
+                )
+                rows = []
+                for region in regions:
+                    values = (table_data.get(model, {}).get(region['id'], {})
+                              .get(str(altitude), []))
+                    cols = []
+                    for i in indices:
+                        cell = values[i] if i < len(values) else {}
+                        present = bool(cell.get("available"))
+                        amount = cell.get("range_cm", "–") if present else "–"
+                        high = cell.get("high_cm")
+                        css_class = ("as-none" if not present else
+                                     "as-heavy" if isinstance(high, (int,float)) and high >= 30 else
+                                     "as-medium" if isinstance(high, (int,float)) and high >= 10 else
+                                     "as-light")
+                        partial = bool(present and cell.get("partial"))
+                        tooltip = (
+                            ("Gedeeltelijke dag" if partial else "Dagberekening")
+                            + (f" · {cell['coverage_hours']} uur" if cell.get("coverage_hours") is not None else "")
+                        ) if present else "Geen data voor deze regio/hoogte"
+                        cols.append(
+                            f'<td class="{css_class}" title="{escape(tooltip, quote=True)}">'
+                            f'{escape(str(amount))}{"*" if partial else ""}</td>'
+                        )
+                    rows.append(
+                        f'<tr><td>{escape(str(region["name"]))}</td>{"".join(cols)}</tr>'
+                    )
+                body += (
+                    f'<h3 class="as-alt">{escape(str(altitude))} m hoogte · cm per dag</h3>'
+                    '<div class="as-scroll"><table><thead><tr>'
+                    f'<th scope="col">Regio</th>{col_heads}</tr></thead>'
+                    f'<tbody>{"".join(rows)}</tbody></table></div>'
+                )
+        views.append(
+            f'<div class="as-model-view as-model-{model}" data-content-model="{model}">'
+            f'{body}</div>'
+        )
+
+    return (
+        '<section id="alpine-snow-tables" aria-label="Sneeuwverwachting per Alpenregio">'
+        '<div class="as-panel">'
+        '<h2>❄️ Sneeuwverwachting per Alpenregio '
+        '<span class="as-badge">ECMWF tot 7 dagen</span></h2>'
+        '<p>Kies hieronder het model. Hybrid en ICON-D2 tonen maximaal 2 '
+        'beschikbare kalenderdagen; ECMWF maximaal 7 dagen. '
+        'De drie hoogtes staan apart en gebruiken echte modelgegevens.</p>'
+        '<div class="as-switcher" role="group" aria-label="Kies een weermodel">'
+        + ''.join(choices) + ''.join(views) + '</div>'
+        '<p class="as-foot">Ranges: 25e–75e percentiel van de sneeuwval '
+        'in de regio op de gekozen hoogte (±100 m). Een * betekent '
+        'gedeeltelijke dag; – betekent onvoldoende gegevens, niet 0 cm. '
+        'Regiogrenzen zijn indicatief.</p>'
+        '</div></section>'
+    )
+
 
 # Legacy website controls may still contain an ICON-CH2 navigation entry,
 # since run_forecast.py itself is not changed in the user's repository.
@@ -751,7 +817,6 @@ def publish_site(summary, site=SITE):
     site.mkdir(parents=True, exist_ok=True)
     (site / "regional_snowfall.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    (site / "alpine_snow_tables.js").write_text(JS_TABLE, encoding="utf-8")
     (site / "hide_icon_ch2.js").write_text(JS_HIDE_CH2, encoding="utf-8")
 
     index = site / "index.html"
@@ -789,7 +854,7 @@ def publish_site(summary, site=SITE):
         panel = (
             '<div id="panel-tables" class="snow-table-panel" role="tabpanel" '
             'aria-labelledby="tab-tables" hidden>\n'
-            + HTML_SECTION + '\n</div>\n'
+            + render_table_section(summary) + '\n</div>\n'
         )
         # Important: no tables under individual map panels.
         page = page.replace('</nav>', button + '\n</nav>\n' + panel, 1)
@@ -803,7 +868,6 @@ def publish_site(summary, site=SITE):
         else:
             page = css + page
         scripts = (
-            '<script src="alpine_snow_tables.js?v=4" defer></script>\n'
             '<script src="hide_icon_ch2.js" defer></script>\n'
         )
         if '</body>' in page:
@@ -978,11 +1042,18 @@ function selectModel(model) {
 }
 </script></body></html>''')
         (fake / 'index.html').write_text(original_page, encoding='utf-8')
-        sample = {'regions':[], 'data':{}, 'dates':[], 'altitudes_m':[]}
+        sample = summary  # Synthetic 1/2/7-day model data from the test above
         publish_site(sample, fake)
         page = (fake/'index.html').read_text(encoding='utf-8')
         assert page.count('id="alpine-snow-tables"') == 1
         assert page.count('id="tab-tables"') == 1
+        assert page.count('id="as-choice-hybrid"') == 1
+        assert page.count('id="as-choice-icon_d2"') == 1
+        assert page.count('id="as-choice-ecmwf"') == 1
+        assert page.count('data-content-model=') == 3
+        assert 'as-choice-ecmwf:checked ~ .as-model-ecmwf' in page
+        assert 'alpine_snow_tables.js' not in page
+        assert '10–20' in page and '25–45' in page and '0–5' in page
         assert page.count('id="panel-tables"') == 1
         assert page.count("['hybrid','ecmwf','icon_d2','tables']") == 2
         assert page.count('data-model="tables"') == 1
