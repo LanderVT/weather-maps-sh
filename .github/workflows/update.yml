@@ -1,4 +1,3 @@
-
 name: Update SnowHybrid + ECMWF + ICON-D2 + Alpine Snow Tables (hourly)
 
 # cron-job.org triggers POST /actions/workflows/update.yml/dispatches.
@@ -24,26 +23,22 @@ concurrency:
 jobs:
   forecast:
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
-
+    timeout-minutes: 75  # Extra time for PNG optimization.
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
 
     env:
       SNOW_MAP_THEME: 'slate'
+      WEBP_QUALITY: '90'
 
-      # ===================================
-      # HYBRID: 48 HOURS, ALPS ONLY
-      # ===================================
+      # Hybrid: 48 h, 3-hour intervals (ICON-CH2 excluded as input).
       HYBRID_GRID_STEP: '0.008'
       HYBRID_DPI: '200'
       HYBRID_MIN_MODELS: '2'
       HYBRID_ESRI_RELIEF: '1'
 
-      # ===================================
-      # ECMWF: 7 DAYS, ALPS ONLY
-      # ===================================
+      # ECMWF: Alps only (no Benelux/full domain).
       ECMWF_AREAS: 'alps'
       ECMWF_N_DAYS: '7'
       ECMWF_GRID_STEP_ALPS: '0.008'
@@ -52,9 +47,7 @@ jobs:
       ECMWF_MAX_RUN_AGE_H: '24'
       ECMWF_ESRI_RELIEF: '1'
 
-      # ===================================
-      # ICON-D2: 48 HOURS, ALPS ONLY
-      # ===================================
+      # Standalone ICON-D2: Alps only.
       ICON_D2_AREAS: 'alps'
       ICON_D2_DPI: '200'
       ICON_D2_GRID_STEP_ALPS: '0.008'
@@ -62,16 +55,10 @@ jobs:
       ICON_D2_ESRI_RELIEF: '1'
       ICON_D2_MAX_RUN_AGE_H: '24'
 
-      # ===================================
-      # ICON-CH2: DISABLED
-      # ===================================
+      # Standalone ICON-CH2 is disabled in the disposable Actions checkout.
       SNOW_DISABLE_ICON_CH2: '1'
 
     steps:
-
-      # ===================================
-      # 1. CHECKOUT
-      # ===================================
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -81,24 +68,19 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      # ===================================
-      # 2. INSTALL DEPENDENCIES
-      # No apt-get: avoids Ubuntu mirror errors.
-      # ===================================
-      - name: Install Python and geospatial libraries
+      # Important: no apt-get. The Ubuntu package mirrors returned HTTP 503.
+      # Python wheels provide ecCodes, GEOS and PROJ binaries.
+      - name: Install Python and geospatial libraries (no apt-get)
         shell: bash
         run: |
           python -m pip install --upgrade pip
-
           python -m pip install --prefer-binary -r requirements.txt
-
           python -m pip install --only-binary=:all: \
             'eccodes>=2.43' \
             'eccodeslib>=2.43' \
             'cfgrib>=0.9.14,<1' \
             'Pillow>=10' \
             cartopy pyproj shapely
-
           python - <<'PY'
           import eccodes
           import cfgrib
@@ -106,57 +88,35 @@ jobs:
           import pyproj
           import shapely
           from PIL import Image
-
-          print(
-              'Python wheels: ecCodes, cfgrib, Cartopy, '
-              'PROJ, GEOS and Pillow OK'
-          )
+          print('Python wheels: ecCodes, cfgrib, Cartopy, PROJ, GEOS and Pillow OK')
           print('ecCodes API:', eccodes.codes_get_api_version())
           PY
 
-      # ===================================
-      # 3. PREPARE MODELS AND TABLE CAPTURE
-      #
-      # Disable standalone ICON-CH2.
-      # Exclude ICON-CH2 as Hybrid input.
-      # Keep shared Hybrid plotting library.
-      # Enable numerical snowfall capture.
-      # ===================================
+      # Make the temporary checkout ignore ICON-CH2 even in --check.
+      # Original repository files are NOT committed or changed permanently.
       - name: Prepare 3 forecast models and numeric captures
         run: python enable_alpine_capture.py
 
-      # ===================================
-      # 4. VERIFY SCRIPTS
-      # ===================================
       - name: Check all scripts and libraries
         run: python run_forecast.py --check
 
       - name: Verify dark map layout imports
         run: |
           python -m py_compile map_style_reference.py snow_dark_adapter.py
-
           python - <<'PYCODE'
           import map_style_reference as design
           import snow_dark_adapter as adapter
-
           assert design.RELIEF_THEME == 'slate'
-          print('Dark/slate map layout OK')
+          print('Dark/slate map layout installed for all model panels')
           PYCODE
 
-      # ===================================
-      # 5. CHECK ALPINE TABLE GENERATOR
-      # ===================================
+      # The complete self-test checks a real numerical capture and DEM match,
+      # not merely whether the HTML tables can be rendered.
       - name: Check Alpine snowfall tables
         run: |
-          python -m py_compile \
-            alpine_snow_tables.py \
-            enable_alpine_capture.py
-
+          python -m py_compile alpine_snow_tables.py enable_alpine_capture.py
           python alpine_snow_tables.py self-test
 
-      # ===================================
-      # 6. GENERATE FORECAST MAPS
-      # ===================================
       - name: Generate Hybrid, ECMWF and ICON-D2 maps and website
         if: inputs.check_only != true
         env:
@@ -164,259 +124,153 @@ jobs:
           SNOW_REGION_CACHE: ${{ github.workspace }}/_regional_snow_snapshots
         run: python run_forecast.py
 
-      # ===================================
-      # 7. VALIDATE WEBSITE
-      #
-      # Publish when at least one model
-      # has successfully generated maps.
-      # ===================================
       - name: Validate website before deployment
         if: inputs.check_only != true
         run: |
           python - <<'PY'
           import json
           from pathlib import Path
-
           p = Path('site/status.json')
-
           if not p.is_file():
-              raise SystemExit(
-                  'No website status.json was generated'
-              )
-
-          status = json.loads(
-              p.read_text(encoding='utf-8')
-          )
-
+              raise SystemExit('No website status.json was generated')
+          status = json.loads(p.read_text(encoding='utf-8'))
           succeeded = []
-
           for model in ('hybrid', 'icon_d2', 'ecmwf'):
-
               entry = status.get('models', {}).get(model, {})
               count = int(entry.get('map_count', 0))
               state = entry.get('status', 'missing')
-
-              print(f'{model}: {state}, {count} maps')
-
+              print(f"{model}: {state}, {count} maps")
               if state == 'ok' and count > 0:
                   succeeded.append(model)
-
               else:
-                  print(
-                      f'::warning::{model} unavailable '
-                      'in this update'
-                  )
-
+                  print(f'::warning::{model} is unavailable in this update')
           if not succeeded:
-              raise SystemExit(
-                  'No successful snow model; '
-                  'preserving previous website'
-              )
-
-          print(
-              'Publishing successful models:',
-              ', '.join(succeeded)
-          )
-
+              raise SystemExit('No successful snow model; preserving previous website')
+          print('Publishing successful model(s):', ', '.join(succeeded))
           print('Standalone ICON-CH2: disabled')
           PY
-
           du -sh site
 
-      # ===================================
-      # 8. BUILD REGIONAL SNOW TABLES
-      #
-      # Fourth website tab:
-      # "Sneeuwtabellen"
-      #
-      # Hybrid: max. 2 available days
-      # ICON-D2: max. 2 available days
-      # ECMWF: max. 7 available days
-      #
-      # Separate tables:
-      # 1000 m, 1500 m, 2000 m
-      #
-      # Dolomites included.
-      # ===================================
+      # Separate Hybrid / ICON-D2 / ECMWF tables, only available days shown.
+      # Never demand a full 5-day period from a 48-hour model.
       - name: Build available regional Alpine snowfall tables
         if: inputs.check_only != true
         env:
           SNOW_REGION_CACHE: ${{ github.workspace }}/_regional_snow_snapshots
         run: python alpine_snow_tables.py build
 
-      # ===================================
-      # 9. OPTIONAL PNG COMPRESSION
-      # ===================================
-      - name: Install optional high-quality PNG optimizer
+      # Compress the actual Pages artifact: convert map PNGs into WebP.
+      # Replace HTML map URLs and delete only the successfully converted PNGs.
+      # This reduces both network transfer and GitHub Pages upload size.
+      - name: Convert published maps to WebP and report site savings
         if: inputs.check_only != true
-        continue-on-error: true
-        timeout-minutes: 3
-        run: |
-          python -m pip install --only-binary=:all: \
-            'imagequant>=1.1.4,<2'
-
-      - name: Compress website PNG maps (optional, safe)
-        if: inputs.check_only != true
-        continue-on-error: true
-        timeout-minutes: 12
+        timeout-minutes: 15
         shell: bash
         run: |
           python - <<'PY'
+          """Convert published model map PNG files to smaller WebP and rewrite website links."""
           from pathlib import Path
-          from PIL import Image
+          from PIL import Image, features
+          import os
+          import re
 
-          try:
-              import imagequant
-              engine = 'imagequant (80-95 quality)'
+          SITE = Path('site')
+          INDEX = SITE / 'index.html'
+          MAPS = SITE / 'maps'
+          QUALITY = int(os.environ.get('WEBP_QUALITY', '90'))
 
-          except ImportError:
-              imagequant = None
-              engine = 'Pillow fallback (256 colors)'
+          if not (60 <= QUALITY <= 100):
+              raise SystemExit('WEBP_QUALITY must be between 60 and 100')
+          if not features.check('webp'):
+              raise SystemExit('Pillow has no WebP encoder; refusing uncompressed publish')
+          if not INDEX.is_file() or not MAPS.is_dir():
+              raise SystemExit('Website index.html or maps folder missing')
 
-          site = Path('site')
+          pngs = sorted(MAPS.rglob('*.png'))
+          if not pngs:
+              raise SystemExit('No model PNG files found; refusing empty deployment')
 
-          if not site.is_dir():
-              print(
-                  '::warning::No site directory; '
-                  'skipping PNG optimization'
-              )
-              raise SystemExit(0)
+          original = INDEX.read_text(encoding='utf-8')
+          site_bytes_before = sum(p.stat().st_size for p in SITE.rglob('*') if p.is_file())
+          map_bytes_before = sum(p.stat().st_size for p in pngs)
+          changes = {}
+          converted = 0
+          unchanged = 0
+          failed = []
 
-          files = sorted(site.rglob('*.png'))
-          threshold = 1 * 1024 * 1024
-
-          before_total = 0
-          after_total = 0
-          optimized = 0
-          skipped = 0
-          failed = 0
-
-          print('PNG optimizer:', engine)
-          print('Found', len(files), 'PNG files')
-
-          for path in files:
-
-              before = path.stat().st_size
-              before_total += before
-
-              if before < threshold:
-                  after_total += before
-                  skipped += 1
-                  continue
-
-              temporary = path.with_name(
-                  path.name + '.optimizing.png'
-              )
-
+          for png in pngs:
+              webp = png.with_suffix('.webp')
+              temporary = webp.with_name(webp.stem + '.temporary.webp')
               try:
-                  with Image.open(path) as original:
-
-                      dimensions = original.size
-
-                      if original.mode in ('P', 'L', '1'):
-                          result = original.copy()
-
-                      elif imagequant is not None:
-                          result = imagequant.quantize_pil_image(
-                              original.convert('RGBA'),
-                              dithering_level=0.7,
-                              max_colors=256,
-                              min_quality=80,
-                              max_quality=95,
-                          )
-
-                      else:
-                          rgba = original.convert('RGBA')
-
-                          result = rgba.quantize(
-                              colors=256,
-                              method=Image.Quantize.FASTOCTREE,
-                          )
-
-                      result.save(
-                          temporary,
-                          format='PNG',
-                          optimize=True
-                      )
-
-                      result.close()
-
-                  # Verify optimized PNG.
-                  with Image.open(temporary) as check:
-                      check.verify()
-
-                  with Image.open(temporary) as check:
-                      if check.size != dimensions:
-                          raise RuntimeError(
-                              'Image dimensions changed'
-                          )
-
-                  after = temporary.stat().st_size
-
-                  if after < before:
-
-                      temporary.replace(path)
-                      optimized += 1
-
-                      reduction = (
-                          100 * (before - after) / before
-                      )
-
-                      print(
-                          f'{path.name}: '
-                          f'{before / 1048576:.2f} -> '
-                          f'{after / 1048576:.2f} MiB '
-                          f'(-{reduction:.0f}%)'
-                      )
-
-                  else:
-                      temporary.unlink()
-                      skipped += 1
-
+                  with Image.open(png) as image:
+                      size = image.size
+                      image.save(temporary, format='WEBP', quality=QUALITY,
+                                 method=6, exact=True)
+                  with Image.open(temporary) as image:
+                      image.verify()
+                  with Image.open(temporary) as image:
+                      if image.size != size:
+                          raise RuntimeError('Map dimensions changed')
+                  if temporary.stat().st_size >= png.stat().st_size:
+                      unchanged += 1
+                      continue
+                  temporary.replace(webp)
+                  old_ref = png.relative_to(SITE).as_posix()
+                  new_ref = webp.relative_to(SITE).as_posix()
+                  if old_ref not in original:
+                      # Do not remove a map file if its reference cannot be rewritten.
+                      webp.unlink(missing_ok=True)
+                      unchanged += 1
+                      continue
+                  changes[old_ref] = new_ref
+                  converted += 1
               except Exception as exc:
-
-                  failed += 1
-
-                  print(
-                      f'::warning::PNG unchanged: '
-                      f'{path.name}: {exc}'
-                  )
-
+                  failed.append(f'{png.name}: {exc}')
               finally:
                   temporary.unlink(missing_ok=True)
 
-              after_total += path.stat().st_size
+          if not changes:
+              raise SystemExit('No map PNGs converted to WebP; refusing ineffective optimization')
 
-          print(
-              f'Optimized: {optimized}, '
-              f'skipped: {skipped}, '
-              f'failed: {failed}'
-          )
+          updated = original
+          for old_ref, new_ref in changes.items():
+              updated = updated.replace(old_ref, new_ref)
 
-          print(
-              f'Before: {before_total / 1048576:.1f} MiB; '
-              f'after: {after_total / 1048576:.1f} MiB; '
-              f'saved: '
-              f'{(before_total - after_total) / 1048576:.1f} MiB'
-          )
+          # All map URLs that occur in src/href attributes must point to real files.
+          for ref in re.findall(r'(?:src|href)=[\"\'](maps/[^\"\'?]+)', updated):
+              if not (SITE / ref).is_file():
+                  raise SystemExit(f'Broken map link after WebP conversion: {ref}')
 
-          if before_total:
+          # Commit the HTML rewrite before removing the PNG originals.
+          temp_index = INDEX.with_suffix('.updated.html')
+          temp_index.write_text(updated, encoding='utf-8')
+          temp_index.replace(INDEX)
+          for old_ref in changes:
+              (SITE / old_ref).unlink()
 
-              reduction = (
-                  100 * (before_total - after_total)
-                  / before_total
-              )
+          site_bytes_after = sum(p.stat().st_size for p in SITE.rglob('*') if p.is_file())
+          map_bytes_after = sum(p.stat().st_size for p in MAPS.rglob('*') if p.is_file())
 
-              print(
-                  f'Total reduction: {reduction:.1f}%'
-              )
+          print('=== MAP WEBP OPTIMIZATION ===', flush=True)
+          print(f'WebP quality: {QUALITY}', flush=True)
+          print(f'Converted: {converted}/{len(pngs)} maps', flush=True)
+          print(f'Kept as PNG: {unchanged + len(failed)} maps', flush=True)
+          print(f'Original map size: {map_bytes_before/1048576:.1f} MiB', flush=True)
+          print(f'Published map size: {map_bytes_after/1048576:.1f} MiB', flush=True)
+          print(f'Original whole site: {site_bytes_before/1048576:.1f} MiB', flush=True)
+          print(f'Published whole site: {site_bytes_after/1048576:.1f} MiB', flush=True)
+          print(f'Whole-site saving: {(site_bytes_before - site_bytes_after)/1048576:.1f} MiB', flush=True)
+          if site_bytes_before:
+              print(f'Whole-site reduction: {100*(site_bytes_before-site_bytes_after)/site_bytes_before:.1f}%', flush=True)
+          for error in failed[:12]:
+              print(f'::warning::WebP conversion failed: {error}', flush=True)
+          if failed:
+              print(f'::warning::{len(failed)} PNG maps were kept due to conversion errors', flush=True)
+          if site_bytes_after >= site_bytes_before:
+              raise SystemExit('Published site did not shrink')
           PY
-
           du -sh site
 
-      # ===================================
-      # 10. GITHUB PAGES DEPLOYMENT
-      # ===================================
       - name: Configure Pages
         if: inputs.check_only != true
         uses: actions/configure-pages@v5
