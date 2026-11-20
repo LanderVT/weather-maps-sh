@@ -45,6 +45,8 @@ REGIONS = (
     ("n_fr", "Noord-Franse Alpen", ((5.60,45.30),(6.28,45.27),(7.11,45.75),(6.95,46.48),(6.22,46.50),(5.65,45.95))),
     ("s_fr", "Zuid-Franse Alpen", ((5.55,43.58),(6.50,43.60),(7.43,44.02),(7.32,45.35),(6.55,45.40),(5.50,44.65))),
     ("valais", "Wallis / Valais", ((6.75,45.86),(7.80,45.82),(8.55,46.23),(8.34,46.71),(7.14,46.59),(6.60,46.20))),
+    # Bern/central polygons have approximate outer bounds. The shared area is
+    # assigned by region_pixel_mask() using the Haslital/Engelberg dividing line.
     ("bern", "Berner Oberland", ((7.00,46.35),(8.37,46.35),(8.55,46.85),(7.92,47.04),(7.12,46.96))),
     # Central Swiss Alps NORTH of the main Alpine watershed: Uri, Engelberg/Titlis,
     # Schwyz and Glarus. Southern exposure of the Gotthard side is handled by Ticino.
@@ -89,13 +91,33 @@ def point_inside_polygon(x: np.ndarray, y: np.ndarray, poly: tuple) -> np.ndarra
 
 
 def region_pixel_mask(x, y, region_id, polygon):
-    """Return the mountain-region mask, giving Ticino exclusive priority.
+    """Assign grid cells to non-overlapping Swiss snow regions.
 
-    The existing polygons are approximate weather regions, and several formerly
-    overlapped the southern Swiss Alps. Remove Ticino pixels from every other
-    region so Ticino vs. Central Switzerland is a meaningful north/south split.
+    The climate-zone outlines are approximate, not canton borders. Ticino has
+    priority over all neighbouring regions, as in previous versions. The shared
+    area of Berner Oberland and Central Switzerland is divided by a gently
+    sloping west/east boundary near the Haslital - Engelberg transition:
+    Meiringen, Hasliberg and Grimsel remain Bernese; Engelberg/Titlis and
+    Susten remain Central Swiss. A grid cell can never belong to both.
+
+    All other regions retain their v11 definitions. This affects only the
+    regional statistics, never the numerical forecasts or map rendering.
     """
+    x = np.asarray(x)
+    y = np.asarray(y)
     result = point_inside_polygon(x, y, polygon)
+
+    if region_id in ("bern", "central_ch"):
+        other = "central_ch" if region_id == "bern" else "bern"
+        shared = result & point_inside_polygon(x, y, REGION_POLYGONS[other])
+        # Approximate dividing line: 8.38 E at 46.55 N, trending gently
+        # westwards northward. It is applied ONLY to pixels in BOTH polygons.
+        divide_lon = 8.38 - 0.17 * (y - 46.55)
+        if region_id == "bern":
+            result &= ~(shared & (x >= divide_lon))
+        else:
+            result &= ~(shared & (x < divide_lon))
+
     if region_id != "ticino":
         result &= ~point_inside_polygon(x, y, REGION_POLYGONS["ticino"])
     return result
@@ -1300,6 +1322,25 @@ def self_test():
     assert region_pixel_mask(np.array([8.95]), np.array([46.19]), "ticino", ticino)[0]
     assert not region_pixel_mask(np.array([8.95]), np.array([46.19]), "lombardy", REGION_POLYGONS["lombardy"])[0]
     assert not region_pixel_mask(np.array([8.60]), np.array([46.53]), "central_ch", central)[0]
+
+    # Regression: no shared pixel between Berner Oberland and Central Swiss north.
+    bern = REGION_POLYGONS["bern"]
+    sx, sy = np.meshgrid(np.linspace(7.8, 8.8, 301),
+                         np.linspace(46.35, 47.15, 241))
+    bern_mask = region_pixel_mask(sx, sy, "bern", bern)
+    central_mask = region_pixel_mask(sx, sy, "central_ch", central)
+    assert bern_mask.any() and central_mask.any()
+    assert not np.any(bern_mask & central_mask), "Bern/Central overlap detected"
+    def belongs(lon, lat, rid):
+        return bool(region_pixel_mask(np.array([lon]), np.array([lat]),
+                                      rid, REGION_POLYGONS[rid])[0])
+    assert belongs(8.186, 46.728, "bern")  # Meiringen
+    assert not belongs(8.186, 46.728, "central_ch")
+    assert belongs(8.342, 46.562, "bern")  # Grimselpass
+    assert belongs(8.406, 46.820, "central_ch")  # Engelberg
+    assert not belongs(8.406, 46.820, "bern")
+    assert belongs(8.437, 46.772, "central_ch")  # Titlis
+    print('Alpen-tabellen: Berner Oberland / Centraal-Zwitserland zonder dubbele pixels OK')
     assert np.percentile(np.arange(101), (25,75)).tolist() == [25., 75.]
 
     assert ALTITUDES == (1000, 1500, 2000, 2500, 3000)
