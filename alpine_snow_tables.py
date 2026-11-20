@@ -615,17 +615,32 @@ def model_daily_stats(records, date, region_id, altitude):
             'coverage_hours': round(coverage, 1), 'files': sorted(used)}
 
 
+def _round_to_nearest_five(cm):
+    """Round snowfall to the nearest 5 cm, using half-up for exact ties.
+
+    Both percentiles are rounded separately; never systematically widen
+    a displayed range just to reach multiples of 5.
+    """
+    return int(5 * math.floor(max(0.0, float(cm)) / 5.0 + 0.5))
+
+
 def _range_text(lo, hi):
+    """Display P25-P75 rounded to the nearest 5 cm independently.
+
+    Example: P25 = 3.8 cm and P75 = 17 cm becomes 5–15 cm.
+    If the rounded endpoints coincide, show a single value rather than
+    creating a fictitious 5 cm spread.
+    """
     if lo is None or hi is None:
         return "–"
-    if hi < 1:
-        return "0"
-    step = 5 if hi <= 50 else 10
-    a = max(0, math.floor(max(lo, 0) / step) * step)
-    b = max(step, math.ceil(max(hi, 0) / step) * step)
-    if a >= b:
-        b = a + step
-    return f"{a}–{b}"
+    try:
+        lo, hi = float(lo), float(hi)
+    except (TypeError, ValueError):
+        return "–"
+    if not (math.isfinite(lo) and math.isfinite(hi)) or lo > hi:
+        return "–"
+    a, b = _round_to_nearest_five(lo), _round_to_nearest_five(hi)
+    return str(a) if a == b else f"{a}–{b}"
 
 
 @lru_cache(maxsize=2048)
@@ -818,6 +833,7 @@ def build_summary(now_utc: datetime | None = None):
             "de getoonde modelperiode (indien rasterbijlagen beschikbaar zijn), "
             "anders een duidelijk gemarkeerde indicatieve som van dagpercentielen. "
             "Ontbrekende dagcellen geven geen volledig cumulatief totaal. "
+            "Beide grenswaarden zijn afzonderlijk naar het dichtstbijzijnde vijftal cm afgerond. "
             "Regiogrenzen zijn benaderde Alpenpolygonen."
         ),
         "data": {},
@@ -1103,11 +1119,13 @@ def render_table_section(summary):
         '<p>Kies eerst het weermodel en daarna de hoogte. '
         'Hybrid en ICON-D2 tonen de kalenderdagen die hun 48-uursperiode raken '
         '(soms 3 dagen); ECMWF tot 7 dagen. '
-        'Ranges gebruiken echte numerieke modelvelden.</p>'
+        'Ranges gebruiken echte numerieke modelvelden met afronding naar het '
+        'dichtstbijzijnde veelvoud van 5 cm.</p>'
         '<div class="as-switcher" role="group" aria-label="Kies een weermodel">'
         + ''.join(choices) + ''.join(views) + '</div>'
         '<p class="as-foot">Ranges: P25–P75 (25e–75e percentiel) van de sneeuwval '
-        'binnen de regio op de gekozen hoogte (±100 m). '
+        'binnen de regio op de gekozen hoogte (±100 m), met afzonderlijke '
+        'afronding naar de dichtstbijzijnde 5 cm. '
         '<strong>Totaal</strong>: P25–P75 na cumulatie per rastercel over de getoonde '
         'voorspellingsperiode; een † betekent dat alleen een indicatieve som '
         'van dagranges beschikbaar was. '
@@ -1286,6 +1304,11 @@ def self_test():
 
     assert ALTITUDES == (1000, 1500, 2000, 2500, 3000)
     assert _range_text(11, 19) == '10–20'
+    assert _range_text(3.8, 17.0) == '5–15'
+    assert _range_text(2.5, 17.5) == '5–20'
+    assert _range_text(12.0, 12.0) == '10'
+    assert _range_text(56.0, 84.0) == '55–85'
+    assert _range_text(4.0, float('nan')) == '–'
     assert _range_text(0, 0.5) == '0'
     assert _coordinates(np.arange(100), np.arange(60), (60, 100)) is None
 
@@ -1342,7 +1365,7 @@ def self_test():
         assert summary['totals']['icon_d2']['dolomites']['3000']['day_count'] == 3
         assert summary['totals']['icon_d2']['dolomites']['3000']['method'].startswith('indicative_')
         assert summary['totals']['hybrid']['dolomites']['1500']['range_cm'] == '30–60'
-        assert summary['totals']['ecmwf']['dolomites']['1500']['range_cm'] == '170–250'
+        assert summary['totals']['ecmwf']['dolomites']['1500']['range_cm'] == '175–245'
 
         # Build and verify 4th main tab + radio buttons at BOTH levels.
         site = Path(td) / 'site'
@@ -1416,6 +1439,7 @@ function selectModel(model) {
         CACHE = old_cache
         DEM_REGISTRY.clear()
     print('Alpen-tabellen: echte cumulatieve raster-P25-P75 en zondag getest')
+    print('Alpen-tabellen: dag- en totaalranges afgerond op dichtstbijzijnde 5 cm OK')
     print('Alpen-tabellen self-test OK')
 
 
