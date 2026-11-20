@@ -3,8 +3,8 @@
 The optional matplotlib capture hook records numerical snowfall fields *during*
 existing map rendering. This avoids OCR / inferring values from map colours and
 avoids downloading GRIB files a second time. Post-processing builds a standalone
-JSON data file plus three HTML tables (1000, 1500, 2000 m), including
-an indicative period-total column for each model.
+JSON data file plus interactive height selection (1000-3000 m) and model-specific
+P10-P90 ranges. Period totals use summed grid pixels where available.
 
 Model fields and elevations must be aligned. If this cannot be demonstrated,
 we publish missing data, never guessed numerical snowfall.
@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 import argparse
 import inspect
 import functools
+import hashlib
 import types
 import json
 import math
@@ -32,7 +33,7 @@ ROOT = Path(__file__).resolve().parent
 CACHE = Path(os.getenv("SNOW_REGION_CACHE", str(ROOT / "_regional_snow_snapshots")))
 SITE = ROOT / "site"
 LOCAL_TZ = ZoneInfo("Europe/Brussels")
-ALTITUDES = (1000, 1500, 2000)
+ALTITUDES = (1000, 1500, 2000, 2500, 3000)
 ALT_HALF_WIDTH = 100.0  # m
 MIN_PIXELS = 15
 DEM_REGISTRY = []  # DEMs already loaded by the original model process.
@@ -58,7 +59,7 @@ REGIONS = (
     ("julian", "Julische Alpen", ((13.28,46.10),(14.36,46.12),(14.30,46.72),(13.37,46.75))),
 )
 MODEL_LABELS = {"hybrid": "Hybrid", "icon_d2": "ICON-D2", "ecmwf": "ECMWF"}
-MODEL_MAX_DISPLAY_DAYS = {"hybrid": 2, "icon_d2": 2, "ecmwf": 7}
+MODEL_MAX_DISPLAY_DAYS = {"hybrid": 3, "icon_d2": 3, "ecmwf": 7}
 NAME_PATTERN = re.compile(
     r"_(?:alps)_(\d{8})_(\d{2})z_f(\d{3})-(\d{3})", re.I
 )
@@ -240,6 +241,7 @@ def capture_figure(fig, output):
     valid_data = np.isfinite(data)
     values = np.where(valid_data, np.maximum(data, 0), np.nan)
     result = {}
+    pixel_arrays = {}
     for region_id, _label, polygon in REGIONS:
         # Limit computation to each region's geographic bounding box first.
         west, east = min(p[0] for p in polygon), max(p[0] for p in polygon)
@@ -258,13 +260,16 @@ def capture_figure(fig, output):
             if int(np.count_nonzero(mask)) < MIN_PIXELS:
                 continue
             selected_values = values[ri[mask], ci[mask]]
-            q25, q50, q75 = np.percentile(selected_values, (25, 50, 75))
+            q10, q50, q90 = np.percentile(selected_values, (10, 50, 90))
             region_values[str(alt)] = {
-                "q25": round(float(q25), 2),
+                "q10": round(float(q10), 2),
                 "median": round(float(q50), 2),
-                "q75": round(float(q75), 2),
+                "q90": round(float(q90), 2),
                 "pixels": int(selected_values.size),
             }
+            flat_index = np.ravel_multi_index((ri[mask], ci[mask]), values.shape)
+            pixel_arrays[f"{region_id}_{alt}_idx"] = flat_index.astype(np.int32)
+            pixel_arrays[f"{region_id}_{alt}_cm"] = selected_values.astype(np.float32)
         if region_values:
             result[region_id] = region_values
     ymd, hh, lead_a, lead_b = match.groups()
@@ -273,7 +278,32 @@ def capture_figure(fig, output):
     end = run + timedelta(hours=int(lead_b))
     if end <= start:
         return False
+    # Save aligned per-pixel values, not merely daily percentiles. We can then
+    # calculate spatial P10/P90 AFTER cumulating the forecast on every pixel.
+    # These NPZ sidecars are ephemeral runner files, never copied to Pages.
+    pixel_file = None
+    grid_id = None
+    if pixel_arrays:
+        try:
+            digest = hashlib.blake2b(digest_size=16)
+            digest.update(np.asarray(values.shape, dtype='<i4').tobytes())
+            for array in (xx, yy, dem):
+                aligned = np.nan_to_num(np.asarray(array, dtype='<f4'),
+                                        nan=-9999.0, posinf=9999.0, neginf=-9999.0)
+                digest.update(np.ascontiguousarray(aligned).tobytes())
+            grid_id = digest.hexdigest()
+            CACHE.mkdir(parents=True, exist_ok=True)
+            pixel_file = path.stem + '.npz'
+            temp_pixels = CACHE / (path.stem + '.writing.npz')
+            np.savez_compressed(temp_pixels, **pixel_arrays)
+            temp_pixels.replace(CACHE / pixel_file)
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f'::warning::Per-pixel sneeuwvelden niet opgeslagen: {exc}', flush=True)
+            pixel_file = None
+            grid_id = None
     payload = {
+        "pixel_file": pixel_file,
+        "grid_id": grid_id,
         "model": model,
         "run_utc": run.isoformat(),
         "start_utc": start.isoformat(),
@@ -528,7 +558,7 @@ def model_daily_stats(records, date, region_id, altitude):
             right = min(end, day_end)
             if right <= left:
                 continue
-            low, high = float(stats['q25']), float(stats['q75'])
+            low, high = float(stats['q10']), float(stats['q90'])
             if not all(map(math.isfinite, (low, high))):
                 continue
         except (TypeError, ValueError, KeyError, AttributeError):
@@ -562,7 +592,7 @@ def model_daily_stats(records, date, region_id, altitude):
     expected_day_hours = (day_end - day_start).total_seconds() / 3600.0
     if coverage < 3.0 or coverage > expected_day_hours + 0.01:
         return None
-    return {'q25': lo, 'q75': hi,
+    return {'q10': lo, 'q90': hi,
             'coverage_hours': round(coverage, 1), 'files': sorted(used)}
 
 
@@ -579,12 +609,115 @@ def _range_text(lo, hi):
     return f"{a}–{b}"
 
 
+@lru_cache(maxsize=2048)
+def _pixel_vectors(path: str, key: str):
+    """Load only one region/altitude pair from an ephemeral capture sidecar."""
+    try:
+        with np.load(path, allow_pickle=False) as source:
+            idx = np.asarray(source[f'{key}_idx'], dtype=np.int32).copy()
+            cm = np.asarray(source[f'{key}_cm'], dtype=np.float32).copy()
+        if idx.ndim != 1 or cm.ndim != 1 or len(idx) != len(cm):
+            return None
+        if len(idx) < MIN_PIXELS or np.any(idx < 0) or not np.isfinite(cm).all():
+            return None
+        return idx, cm
+    except (KeyError, OSError, ValueError, EOFError):
+        return None
+
+
+def _actual_cumulative_range(records, dates, indices, region_id, altitude, partial):
+    """P10/P90 of each pixel's accumulated snowfall in the displayed period.
+
+    We take the shortest unique source covering each time interval, in case
+    a cumulative plot slipped into the snapshots alongside daily maps. Each
+    interval contributes once; its units are snowfall in cm across the WHOLE
+    interval. Crossing midnight does not change the period total. Pixels
+    lacking even one interval are excluded rather than silently set to zero.
+    """
+    if not indices:
+        return None
+    first = datetime.combine(dates[indices[0]], clocktime.min, tzinfo=LOCAL_TZ).astimezone(timezone.utc)
+    last = datetime.combine(dates[indices[-1]] + timedelta(days=1),
+                            clocktime.min, tzinfo=LOCAL_TZ).astimezone(timezone.utc)
+    key = f'{region_id}_{altitude}'
+    sources = []
+    for row in records:
+        if key not in {
+            f'{region_id}_{a}' for a in row.get('statistics', {}).get(region_id, {})
+        }:
+            continue
+        file_name = row.get('pixel_file')
+        grid_id = row.get('grid_id')
+        if not file_name or not grid_id:
+            continue
+        try:
+            a = datetime.fromisoformat(row['start_utc']).astimezone(timezone.utc)
+            b = datetime.fromisoformat(row['end_utc']).astimezone(timezone.utc)
+        except (KeyError, ValueError, TypeError):
+            continue
+        if b <= a or b <= first or a >= last:
+            continue
+        pixels = _pixel_vectors(str(CACHE / Path(file_name).name), key)
+        if pixels is None:
+            continue
+        sources.append((a, b, (b-a).total_seconds(), grid_id, pixels,
+                        str(row.get('file', ''))))
+    if not sources or len({r[3] for r in sources}) != 1:
+        return None
+
+    first_data = max(first, min(x[0] for x in sources))
+    last_data = min(last, max(x[1] for x in sources))
+    if last_data <= first_data:
+        return None
+    boundaries = {first_data, last_data}
+    for a, b, *_ in sources:
+        boundaries.add(max(first_data, min(last_data, a)))
+        boundaries.add(max(first_data, min(last_data, b)))
+
+    selected = []
+    temporal_coverage = 0.0
+    for start, end in zip(sorted(boundaries), sorted(boundaries)[1:]):
+        seconds = (end - start).total_seconds()
+        if seconds <= 0:
+            continue
+        candidates = [r for r in sources if r[0] <= start and r[1] >= end]
+        if not candidates:
+            return None  # A true gap inside the required forecast period.
+        source = min(candidates, key=lambda r: (r[2], r[0], r[5]))
+        selected.append((source[4], seconds, seconds / source[2]))
+        temporal_coverage += seconds
+    if not selected or temporal_coverage < (last_data-first_data).total_seconds() - 1.0:
+        return None
+
+    grid_length = 1 + max(int(pair[0][0].max()) for pair in selected)
+    total_cm = np.zeros(grid_length, dtype=np.float32)
+    pixel_coverage = np.zeros(grid_length, dtype=np.float32)
+    for (idx, amount), seconds, factor in selected:
+        np.add.at(total_cm, idx, amount * factor)
+        np.add.at(pixel_coverage, idx, seconds)
+    good = pixel_coverage >= temporal_coverage - 1.0
+    if np.count_nonzero(good) < MIN_PIXELS:
+        return None
+    low, high = np.percentile(total_cm[good], (10, 90))
+    return {
+        'available': True,
+        'range_cm': _range_text(float(low), float(high)),
+        'low_cm': round(float(low), 1),
+        'high_cm': round(float(high), 1),
+        'coverage_hours': round(temporal_coverage/3600, 1),
+        'partial': bool(partial),
+        'day_count': len(indices),
+        'method': 'p10_p90_of_pixelwise_cumulative_snow',
+        'pixels': int(np.count_nonzero(good)),
+    }
+
+
 def _sum_visible_day_ranges(cells, indices):
     """Indicative snowfall range across precisely the displayed calendar days.
 
     Source snapshots currently contain regional daily quantiles, not the full
-    per-pixel cumulative field. Summing lower/upper daily quantiles therefore
-    gives an *indicative* period range, not the spatial q25/q75 of accumulated
+    per-pixel cumulative field in older snapshots. Summing lower/upper daily quantiles therefore
+    gives an *indicative* period range, not the spatial q10/q90 of accumulated
     snow. Missing days must not silently be treated as zero snowfall.
     """
     unavailable = {"available": False, "range_cm": "–"}
@@ -618,14 +751,14 @@ def _sum_visible_day_ranges(cells, indices):
         "coverage_hours": round(sum(float(c.get("coverage_hours", 0)) for c in daily), 1),
         "partial": partial,
         "day_count": len(daily),
-        "method": "indicative_sum_of_daily_regional_q25_q75",
+        "method": "indicative_sum_of_daily_regional_q10_q90",
     }
 
 
 def build_summary(now_utc: datetime | None = None):
     """Build distinct per-model tables for their available forecast dates.
 
-    Hybrid and ICON-D2 show at most two calendar dates; ECMWF up to seven.
+    Hybrid and ICON-D2 show up to three touched calendar dates (48h); ECMWF seven.
     The date window starts today, and empty future days are never fabricated.
     ICON-CH2 is never included.
     """
@@ -658,12 +791,13 @@ def build_summary(now_utc: datetime | None = None):
         "models_found": {m: len(v) for m, v in by_model.items()},
         "method": (
             "Afzonderlijke modellen (Hybrid, ICON-D2 en ECMWF); geen menging. "
-            "Ruimtelijke 25e–75e percentielen binnen +/-100 m van de aangegeven hoogte. "
+            "Ruimtelijke 10e–90e percentielen binnen +/-100 m van de aangegeven hoogte. "
             "Overlappende dag- en cumulatieve kaartintervallen worden niet dubbel geteld. "
             "Dagtotalen zijn benaderingen indien modelkaart-intervallen niet met kalenderdagen "
             "samenvallen. Gedeeltelijke dagen zijn als zodanig aangeduid; geen volledige 24u-som. "
-            "De totaalkolom is de som van de dagpercentielen over uitsluitend de "
-            "weergegeven datums (indicatief; niet het percentiel van het totale rasterveld). "
+            "De totaalkolom is P10–P90 van per-pixel gecumuleerde sneeuwval over "
+            "de getoonde modelperiode (indien rasterbijlagen beschikbaar zijn), "
+            "anders een duidelijk gemarkeerde indicatieve som van dagpercentielen. "
             "Ontbrekende dagcellen geven geen volledig cumulatief totaal. "
             "Regiogrenzen zijn benaderde Alpenpolygonen."
         ),
@@ -685,20 +819,20 @@ def build_summary(now_utc: datetime | None = None):
                         continue
                     day_available.add(i)
                     cells.append({
-                        "range_cm": _range_text(val["q25"], val["q75"]),
-                        "low_cm": round(float(val["q25"]), 1),
-                        "high_cm": round(float(val["q75"]), 1),
+                        "range_cm": _range_text(val["q10"], val["q90"]),
+                        "low_cm": round(float(val["q10"]), 1),
+                        "high_cm": round(float(val["q90"]), 1),
                         "coverage_hours": val["coverage_hours"],
                         "partial": val["coverage_hours"] < 23.5,
                         "available": True,
                     })
                 model_data[region_id][str(alt)] = cells
         summary["data"][model] = model_data
-        # Never skip a calendar day to fill the two forecast columns. A
+        # Never skip an interior calendar day to fill the forecast columns. A
         # 48-hour run started Friday can touch Friday, Saturday and Sunday;
-        # showing Friday and Sunday with Saturday missing was misleading.
+        # Friday-to-Sunday 48h run must show all THREE dates, including partial Sunday.
         # Display consecutive dates from the first through the last observed
-        # date, capped at two days (Hybrid / ICON-D2) or seven (ECMWF).
+        # date, capped at 3 touched dates (48h models) or seven (ECMWF).
         # Missing interior dates get an explicit dash rather than disappearing.
         observed = sorted(day_available)
         if observed:
@@ -708,13 +842,20 @@ def build_summary(now_utc: datetime | None = None):
         else:
             indices = []
         summary["available_day_indices"][model] = indices
-        summary["totals"][model] = {
-            region_id: {
-                str(alt): _sum_visible_day_ranges(model_data[region_id][str(alt)], indices)
-                for alt in ALTITUDES
-            }
-            for region_id, _label, _poly in REGIONS
-        }
+        totals_for_model = {}
+        for region_id, _label, _poly in REGIONS:
+            totals_for_model[region_id] = {}
+            for alt in ALTITUDES:
+                daily = model_data[region_id][str(alt)]
+                fallback = _sum_visible_day_ranges(daily, indices)
+                if fallback['available']:
+                    exact = _actual_cumulative_range(
+                        by_model[model], dates, indices, region_id, alt,
+                        bool(fallback.get('partial')))
+                    totals_for_model[region_id][str(alt)] = exact or fallback
+                else:
+                    totals_for_model[region_id][str(alt)] = fallback
+        summary['totals'][model] = totals_for_model
     return summary
 
 
@@ -756,10 +897,27 @@ HTML_STYLES = r"""
 #alpine-snow-tables #as-choice-icon_d2:checked ~ .as-model-icon_d2,
 #alpine-snow-tables #as-choice-ecmwf:checked ~ .as-model-ecmwf {display:block}
 #alpine-snow-tables .as-empty {padding:14px 16px;background:#25344b;border:1px solid #485b76;border-radius:10px}
+/* Five independent, native height choices inside each model pane. */
+#alpine-snow-tables .as-height-picker {display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin:16px 0 8px}
+#alpine-snow-tables .as-height-radio {position:absolute;width:1px;height:1px;opacity:0;overflow:hidden;clip-path:inset(50%)}
+#alpine-snow-tables .as-height-picker label.as-height-button {display:inline-flex;align-items:center;justify-content:center;min-height:38px;padding:7px 15px;background:#243248;color:#e5eef9;border:1px solid #566782;border-radius:9px;cursor:pointer;user-select:none;font-size:.87rem}
+#alpine-snow-tables .as-height-picker label.as-height-button:hover {background:#30445f}
+#alpine-snow-tables .as-height-radio:checked + label.as-height-button {background:#e3edf8;color:#182639;border-color:#dbe8f8;font-weight:750}
+#alpine-snow-tables .as-height-radio:focus-visible + label.as-height-button {outline:3px solid #8accff;outline-offset:2px}
+#alpine-snow-tables .as-height-view {display:none;flex:0 0 100%;width:100%;min-width:0}
+#alpine-snow-tables .as-alt-helper {font-size:.79rem;color:#a7b6c9;flex:0 0 100%;margin:3px 0 6px}
+
 /* Hide any legacy ICON-CH2 panels with predictable IDs or data-model attributes. */
 #tab-icon_ch2,#tab-icon-ch2,#panel-icon_ch2,#panel-icon-ch2,[data-model="icon_ch2"],[data-model="icon-ch2"]{display:none!important}
 </style>
 """
+HEIGHT_SELECTORS = "\n".join(
+    f'#alpine-snow-tables #as-height-{model}-{alt}:checked ~ .as-height-view-{model}-{alt}{{display:block}}'
+    for model in MODEL_LABELS for alt in ALTITUDES
+)
+HTML_STYLES = HTML_STYLES.replace('</style>', HEIGHT_SELECTORS + '\n</style>')
+
+
 def render_table_section(summary):
     """Render each model table into HTML at build time.
 
@@ -817,21 +975,33 @@ def render_table_section(summary):
                 'kunnen wel gegevens bevatten.</p>'
             )
         else:
-            horizon = 7 if model == 'ecmwf' else 2
+            horizon = 'maximaal 7 kalenderdagen' if model == 'ecmwf' else '48 uur (maximaal 3 kalenderdagen)'
             body = (
                 f'<p><strong>{escape(names[model])}</strong> · '
-                f'{len(indices)} beschikbare dag(en) (maximaal {horizon}) · '
+                f'{len(indices)} kalenderdag(en) · {horizon} · '
                 f'bijgewerkt {escape(updated_str)}. '
                 'Een * duidt een gedeeltelijke dag aan.</p>'
             )
+
+            # Produce all five tables at build time. A second layer of native
+            # radio buttons shows only ONE selected altitude at a time.
+            height_choices, height_views = [], []
+            default_height = 1500 if 1500 in altitudes else altitudes[0]
             for altitude in altitudes:
+                height_choices.append(
+                    f'<input class="as-height-radio" type="radio" '
+                    f'name="as-height-choice-{model}" '
+                    f'id="as-height-{model}-{altitude}" value="{altitude}"'
+                    + (' checked' if altitude == default_height else '') + '>'
+                    + f'<label class="as-height-button" for="as-height-{model}-{altitude}">{altitude} m</label>'
+                )
                 col_heads = ''.join(
                     f'<th scope="col">{escape(short_date(date_list[i]))}</th>'
                     for i in indices
                 )
                 col_heads += (
                     '<th scope="col" class="as-total" '
-                    'title="Indicatieve som van de getoonde dagen, in cm">'
+                    'title="Cumulatieve sneeuwval over de getoonde periode, in cm">'
                     'Totaal</th>'
                 )
                 rows = []
@@ -841,18 +1011,18 @@ def render_table_section(summary):
                     cols = []
                     for i in indices:
                         cell = values[i] if i < len(values) else {}
-                        present = bool(cell.get("available"))
-                        amount = cell.get("range_cm", "–") if present else "–"
-                        high = cell.get("high_cm")
-                        css_class = ("as-none" if not present else
-                                     "as-heavy" if isinstance(high, (int,float)) and high >= 30 else
-                                     "as-medium" if isinstance(high, (int,float)) and high >= 10 else
-                                     "as-light")
-                        partial = bool(present and cell.get("partial"))
+                        present = bool(cell.get('available'))
+                        amount = cell.get('range_cm', '–') if present else '–'
+                        high = cell.get('high_cm')
+                        css_class = ('as-none' if not present else
+                                     'as-heavy' if isinstance(high, (int,float)) and high >= 30 else
+                                     'as-medium' if isinstance(high, (int,float)) and high >= 10 else
+                                     'as-light')
+                        partial = bool(present and cell.get('partial'))
                         tooltip = (
-                            ("Gedeeltelijke dag" if partial else "Dagberekening")
-                            + (f" · {cell['coverage_hours']} uur" if cell.get("coverage_hours") is not None else "")
-                        ) if present else "Geen data voor deze regio/hoogte"
+                            ('Gedeeltelijke dag' if partial else 'Dagberekening')
+                            + (f" · {cell['coverage_hours']} uur" if cell.get('coverage_hours') is not None else '')
+                        ) if present else 'Geen data voor deze regio/hoogte'
                         cols.append(
                             f'<td class="{css_class}" title="{escape(tooltip, quote=True)}">'
                             f'{escape(str(amount))}{"*" if partial else ""}</td>'
@@ -866,26 +1036,41 @@ def render_table_section(summary):
                                    'as-medium' if isinstance(total_high, (int, float)) and total_high >= 10 else
                                    'as-light')
                     total_partial = total_ok and bool(period.get('partial'))
+                    total_exact = period.get('method') == 'p10_p90_of_pixelwise_cumulative_snow'
                     total_title = (
-                        f'Indicatieve som van {period.get("day_count", len(indices))} getoonde dagranges; '
-                        'niet het percentiel van een cumulatief rasterveld'
-                        + ('; bevat een gedeeltelijke dag' if total_partial else '')
-                    ) if total_ok else 'Geen volledig totaal: minstens één dag heeft onvoldoende gegevens'
+                        ('P10-P90 van per-pixel gecumuleerde sneeuwval' if total_exact else
+                         'Indicatieve som van dagelijkse P10-P90 ranges')
+                        + (f" · {period['coverage_hours']} uur" if period.get('coverage_hours') is not None else '')
+                        + (' · bevat gedeeltelijke dag' if total_partial else '')
+                    ) if total_ok else 'Geen volledig totaal: minstens een dag heeft onvoldoende gegevens'
                     cols.append(
-                        f'<td class="as-total {total_class}" '
-                        f'title="{escape(total_title, quote=True)}">'
+                        f'<td class="as-total {total_class}" title="{escape(total_title, quote=True)}">'
                         f'{escape(str(period.get("range_cm", "–")))}'
-                        f'{"*" if total_partial else ""}</td>'
+                        f'{"*" if total_partial else ""}'
+                        f'{"†" if total_ok and not total_exact else ""}</td>'
                     )
                     rows.append(
                         f'<tr><td>{escape(str(region["name"]))}</td>{"".join(cols)}</tr>'
                     )
-                body += (
-                    f'<h3 class="as-alt">{escape(str(altitude))} m hoogte · cm per dag + totaal</h3>'
+                table_html = (
                     '<div class="as-scroll"><table><thead><tr>'
                     f'<th scope="col">Regio</th>{col_heads}</tr></thead>'
                     f'<tbody>{"".join(rows)}</tbody></table></div>'
                 )
+                height_views.append(
+                    f'<div class="as-height-view as-height-view-{model}-{altitude}" '
+                    f'data-altitude="{altitude}">'
+                    f'<h3 class="as-alt">{altitude} m hoogte · cm sneeuwval</h3>'
+                    f'{table_html}</div>'
+                )
+            body += (
+                '<div class="as-height-picker" role="group" aria-label="Kies de hoogte">'
+                + ''.join(height_choices)
+                + '<div class="as-alt-helper">Sneeuwval in de hoogteband van '
+                  '±100 m rond de gekozen hoogte.</div>'
+                + ''.join(height_views)
+                + '</div>'
+            )
         views.append(
             f'<div class="as-model-view as-model-{model}" data-content-model="{model}">'
             f'{body}</div>'
@@ -896,21 +1081,23 @@ def render_table_section(summary):
         '<div class="as-panel">'
         '<h2>❄️ Sneeuwverwachting per Alpenregio '
         '<span class="as-badge">ECMWF tot 7 dagen</span></h2>'
-        '<p>Kies hieronder het model. Hybrid en ICON-D2 tonen maximaal 2 '
-        'beschikbare kalenderdagen; ECMWF maximaal 7 dagen. '
-        'De drie hoogtes staan apart en gebruiken echte modelgegevens.</p>'
+        '<p>Kies eerst het weermodel en daarna de hoogte. '
+        'Hybrid en ICON-D2 tonen de kalenderdagen die hun 48-uursperiode raken '
+        '(soms 3 dagen); ECMWF tot 7 dagen. '
+        'Ranges gebruiken echte numerieke modelvelden.</p>'
         '<div class="as-switcher" role="group" aria-label="Kies een weermodel">'
         + ''.join(choices) + ''.join(views) + '</div>'
-        '<p class="as-foot">Ranges: 25e–75e percentiel van de sneeuwval '
-        'in de regio op de gekozen hoogte (±100 m). <strong>Totaal</strong> '
-        'is de indicatieve som van de dagranges over de getoonde datums; '
-        'dit is niet exact het percentiel van de gecumuleerde sneeuwkaart. '
-        'Een * betekent dat minstens één dag gedeeltelijk is; '
-        '– betekent onvoldoende gegevens (niet 0 cm). '
+        '<p class="as-foot">Ranges: P10–P90 (10e–90e percentiel) van de sneeuwval '
+        'binnen de regio op de gekozen hoogte (±100 m). '
+        '<strong>Totaal</strong>: P10–P90 na cumulatie per rastercel over de getoonde '
+        'voorspellingsperiode; een † betekent dat alleen een indicatieve som '
+        'van dagranges beschikbaar was. '
+        'Een * duidt een gedeeltelijke kalenderdag aan; '
+        '– betekent onvoldoende gegevens, niet 0 cm. '
+        'De dagwaarden zijn bij kaartintervallen rond middernacht naar tijdsduur verdeeld. '
         'Regiogrenzen zijn indicatief.</p>'
         '</div></section>'
     )
-
 
 # Legacy website controls may still contain an ICON-CH2 navigation entry,
 # since run_forecast.py itself is not changed in the user's repository.
@@ -1064,110 +1251,73 @@ def main():
 
 def self_test():
     from tempfile import TemporaryDirectory
-    from unittest.mock import patch
-    lon = np.linspace(6.0, 15.0, 1000)
-    lat = np.linspace(44.0, 49.0, 500)
-    xx, yy = np.broadcast_arrays(lon[None,:], lat[:,None])
+    global CACHE
     assert point_inside_polygon(np.array([7.5]), np.array([46.2]), REGIONS[2][2])[0]
     assert not point_inside_polygon(np.array([13.5]), np.array([46.2]), REGIONS[2][2])[0]
-    assert _coordinates(lon, lat, (500,1000)) is not None
-    assert _coordinates(lon[:-10], lat, (500,1000)) is None
-    assert _range_text(11,19)=="10–20"
-    assert _range_text(.2,.5)=="0"
-    assert _range_text(0,3)=="0–5"
-    # Real extraction smoke test: a synthetic numeric field + the same DEM
-    # must yield a JSON snapshot with a nonempty 1500-m Dolomites result.
+    assert ALTITUDES == (1000, 1500, 2000, 2500, 3000)
+    assert _range_text(11, 19) == '10–20'
+    assert _range_text(0, 0.5) == '0'
+    assert _coordinates(np.arange(100), np.arange(60), (60, 100)) is None
+
+    # Direct numerical capture: ensure both quantiles and pixel vectors exist.
     with TemporaryDirectory() as td:
-        global CACHE
         old_cache = CACHE
-        CACHE = Path(td) / 'snapshots'
+        CACHE = Path(td) / 'capture'
         DEM_REGISTRY.clear()
         lon = np.linspace(5.0, 16.8, 590)
         lat = np.linspace(43.6, 49.0, 270)
-        dem = np.full((lat.size, lon.size), 1500.0, dtype='float32')
+        dem = np.full((lat.size, lon.size), 3000., dtype='float32')
         assert register_dem(lon, lat, dem)
-        snow = np.full(dem.shape, 15.0, dtype='float32')
-        date = datetime(2026, 11, 19, 12, tzinfo=timezone.utc)
-        assert capture_numeric_field(snow, lon, lat, 'alps', date,
-                                     12, 36, 'ecmwf')
+        snow = np.full(dem.shape, 15., dtype='float32')
+        run = datetime(2026, 11, 20, 12, tzinfo=timezone.utc)
+        assert capture_numeric_field(snow, lon, lat, 'alps', run, 0, 24, 'ecmwf')
         files = list(CACHE.glob('*.json'))
         assert len(files) == 1
-        snapshot = json.loads(files[0].read_text())
-        assert snapshot['statistics']['dolomites']['1500']['median'] == 15.0
-        assert snapshot['statistics']['dolomites']['1500']['pixels'] >= MIN_PIXELS
-        print('Alpen-tabellen: echte capturetest OK (Dolomieten 1500 m = 15 cm)')
+        record = json.loads(files[0].read_text())
+        assert record['statistics']['dolomites']['3000']['q10'] == 15.0
+        assert record['statistics']['dolomites']['3000']['q90'] == 15.0
+        assert (CACHE / record['pixel_file']).exists()
+        vectors = _pixel_vectors(str(CACHE / record['pixel_file']), 'dolomites_3000')
+        assert vectors is not None and len(vectors[0]) >= MIN_PIXELS
         CACHE = old_cache
         DEM_REGISTRY.clear()
-    # Partial horizons: one day ICON-D2, two Hybrid, seven ECMWF.
+    print('Alpen-tabellen: vijf hoogtes, P10-P90 en rasterbijlagen OK')
+
+    # Per-model horizons: 48h can touch 3 different dates.
     with TemporaryDirectory() as td:
-        previous = CACHE
-        CACHE = Path(td) / 'synthetic_records'
+        old_cache = CACHE
+        CACHE = Path(td) / 'synthetic'
         CACHE.mkdir()
-        today = datetime(2026, 11, 19, 12, tzinfo=timezone.utc)
-        for model, days in (("icon_d2", 1), ("hybrid", 2), ("ecmwf", 7)):
+        run = datetime(2026, 11, 20, 12, tzinfo=timezone.utc)
+        local_today = run.astimezone(LOCAL_TZ).date()
+        for model, days in (('hybrid', 3), ('icon_d2', 3), ('ecmwf', 7)):
             for n in range(days):
-                start = (datetime.combine(today.astimezone(LOCAL_TZ).date(),
-                           clocktime.min, tzinfo=LOCAL_TZ)
-                         + timedelta(days=n)).astimezone(timezone.utc)
-                end = start + timedelta(hours=24)
-                row = {
-                    "model": model, "run_utc": today.isoformat(),
-                    "start_utc": start.isoformat(), "end_utc": end.isoformat(),
-                    "file": f"{model}-{n}.png",
-                    "statistics": {"dolomites": {"1500": {
-                        "q25": {"icon_d2": 0.0, "hybrid": 10.0, "ecmwf": 25.0}[model],
-                        "median": {"icon_d2": 2.0, "hybrid": 15.0, "ecmwf": 35.0}[model],
-                        "q75": {"icon_d2": 5.0, "hybrid": 20.0, "ecmwf": 45.0}[model],
-                        "pixels": 150
-                    }}}
-                }
-                (CACHE / f'{model}-{n}.json').write_text(json.dumps(row))
-        summary = build_summary(datetime(2026, 11, 19, 17, tzinfo=timezone.utc))
-        assert len(summary['available_day_indices']['icon_d2']) == 1
-        assert len(summary['available_day_indices']['hybrid']) == 2
-        assert len(summary['available_day_indices']['ecmwf']) == 7
-        assert set(summary['models_found']) == {'hybrid','icon_d2','ecmwf'}
-        # Model-specific totals over only the *visible* dates.
-        assert summary['totals']['icon_d2']['dolomites']['1500']['range_cm'] == '0–5'
-        assert summary['totals']['hybrid']['dolomites']['1500']['range_cm'] == '20–40'
-        assert summary['totals']['ecmwf']['dolomites']['1500']['range_cm'] == '170–320'
-        assert summary['totals']['hybrid']['dolomites']['1500']['day_count'] == 2
-        assert summary['totals']['ecmwf']['dolomites']['1500']['day_count'] == 7
-        assert summary['totals']['hybrid']['bern']['1500']['range_cm'] == '–'
-        assert _sum_visible_day_ranges([{'available': True,'low_cm':2,'high_cm':5}], [0,1])['range_cm'] == '–'
-        assert _sum_visible_day_ranges([{'available': True,'low_cm':3,'high_cm':4,'partial':True}], [0])['partial']
-        assert summary['data']['icon_d2']['dolomites']['1500'][0]['available']
-        assert summary['data']['ecmwf']['dolomites']['1500'][6]['available']
-        assert summary['data']['icon_d2']['dolomites']['1500'][0]['range_cm'] == '0–5'
-        assert summary['data']['hybrid']['dolomites']['1500'][0]['range_cm'] == '10–20'
-        assert summary['data']['ecmwf']['dolomites']['1500'][0]['range_cm'] == '25–45'
-        # Explicitly verify that even accidentally longer source series
-        # cannot add extra columns to the short-range model tables.
-        for model, n in (('icon_d2', 1), ('hybrid', 2), ('ecmwf', 7)):
-            later = (datetime.combine(today.astimezone(LOCAL_TZ).date(),
-                     clocktime.min, tzinfo=LOCAL_TZ)
-                     + timedelta(days=n)).astimezone(timezone.utc)
-            record = {
-                'model': model, 'run_utc': today.isoformat(),
-                'start_utc': later.isoformat(),
-                'end_utc': (later+timedelta(hours=24)).isoformat(),
-                'file': f'{model}-extra.png',
-                'statistics': {'dolomites': {'1500': {
-                    'q25': 10., 'median': 15., 'q75': 20., 'pixels': 150}}}
-            }
-            (CACHE/f'{model}-extra.json').write_text(json.dumps(record))
-        capped = build_summary(datetime(2026, 11, 19, 17, tzinfo=timezone.utc))
-        assert len(capped['available_day_indices']['icon_d2']) == 2
-        assert len(capped['available_day_indices']['hybrid']) == 2
-        assert len(capped['available_day_indices']['ecmwf']) == 7
-        CACHE = previous
-        print('Alpen-tabellen: afzonderlijke modelwaarden en horizons getest (1/2/7 dagen)')
-    with TemporaryDirectory() as td:
-        root = Path(td)
-        fake = root / 'site'; fake.mkdir()
-        # Use the same main-tab structure and selectModel() lists as
-        # run_forecast.py AFTER enable_alpine_capture.py disables ICON-CH2.
-        original_page = ('''<!doctype html><html><head><title>Snow maps</title></head>
+                a = datetime.combine(local_today + timedelta(days=n),
+                                     clocktime.min, tzinfo=LOCAL_TZ).astimezone(timezone.utc)
+                b = datetime.combine(local_today + timedelta(days=n+1),
+                                     clocktime.min, tzinfo=LOCAL_TZ).astimezone(timezone.utc)
+                low = {'hybrid': 10., 'icon_d2': 5., 'ecmwf': 25.}[model]
+                row = {'model': model, 'run_utc': run.isoformat(),
+                       'start_utc': a.isoformat(), 'end_utc': b.isoformat(),
+                       'file': f'{model}_{n}.png',
+                       'statistics': {'dolomites': {str(alt): {
+                           'q10': low, 'median': low+5., 'q90': low+10.,
+                           'pixels': 200} for alt in ALTITUDES}}}
+                (CACHE / f'{model}_{n}.json').write_text(json.dumps(row))
+        summary = build_summary(datetime(2026, 11, 20, 17, tzinfo=timezone.utc))
+        for model, expected in (('hybrid', 3), ('icon_d2', 3), ('ecmwf', 7)):
+            assert len(summary['available_day_indices'][model]) == expected
+        assert summary['dates'][2] == '2026-11-22'
+        assert summary['data']['icon_d2']['dolomites']['3000'][2]['available']
+        assert summary['totals']['icon_d2']['dolomites']['3000']['day_count'] == 3
+        assert summary['totals']['icon_d2']['dolomites']['3000']['method'].startswith('indicative_')
+        assert summary['totals']['hybrid']['dolomites']['1500']['range_cm'] == '30–60'
+        assert summary['totals']['ecmwf']['dolomites']['1500']['range_cm'] == '170–250'
+
+        # Build and verify 4th main tab + radio buttons at BOTH levels.
+        site = Path(td) / 'site'
+        site.mkdir()
+        original_page = ("""<!doctype html><html><head><title>Snow maps</title></head>
 <body><main><nav class="tabs" role="tablist">
 <button id="tab-hybrid" data-model="hybrid">Hybrid</button>
 <button id="tab-ecmwf" data-model="ecmwf">ECMWF</button>
@@ -1184,80 +1334,58 @@ function selectModel(model) {
     document.getElementById('tab-'+key).setAttribute('aria-selected',String(key===model));
   }
 }
-</script></body></html>''')
-        (fake / 'index.html').write_text(original_page, encoding='utf-8')
-        sample = summary  # Synthetic 1/2/7-day model data from the test above
-        publish_site(sample, fake)
-        page = (fake/'index.html').read_text(encoding='utf-8')
-        assert page.count('id="alpine-snow-tables"') == 1
+</script></body></html>""")
+        (site / 'index.html').write_text(original_page, encoding='utf-8')
+        publish_site(summary, site)
+        page = (site / 'index.html').read_text(encoding='utf-8')
         assert page.count('id="tab-tables"') == 1
+        assert page.count('id="panel-tables"') == 1
         assert page.count('id="as-choice-hybrid"') == 1
         assert page.count('id="as-choice-icon_d2"') == 1
         assert page.count('id="as-choice-ecmwf"') == 1
-        assert page.count('data-content-model=') == 3
-        assert 'as-choice-ecmwf:checked ~ .as-model-ecmwf' in page
-        assert 'alpine_snow_tables.js' not in page
-        assert '10–20' in page and '25–45' in page and '0–5' in page
-        assert page.count('class="as-total"') == 9  # 3 models x 3 altitude table headers
-        assert '20–40' in page and '170–320' in page
-        assert page.count('id="panel-tables"') == 1
-        assert page.count("['hybrid','ecmwf','icon_d2','tables']") == 2
-        assert page.count('data-model="tables"') == 1
-        assert page.index('</nav>') < page.index('id="panel-tables"') < page.index('id="panel-hybrid"')
-        assert 'Hybrid Maps' in page and 'ECMWF Maps' in page and 'ICON-D2 Maps' in page
-        assert 'aria-labelledby="tab-tables" hidden' in page
-        assert '#panel-tables[hidden]{display:none!important}' in page
-        # A second publication should not duplicate the tab or the tables.
-        publish_site(sample, fake)
-        page = (fake/'index.html').read_text(encoding='utf-8')
-        assert page.count('id="alpine-snow-tables"') == 1
-        assert page.count('id="tab-tables"') == 1
-        assert (fake/'regional_snowfall.json').is_file()
-        assert (fake/'hide_icon_ch2.js').is_file()
-        assert 'icon_ch2' not in json.loads((fake/'regional_snowfall.json').read_text()).get('models_found', {})
-        print('Alpen-tabellen: vierde website-tab getest; geen duplicaten')
-    # Regression: previously a Friday-Sunday 0-48h cumulative map plus
-    # Friday/Saturday individual maps caused Saturday coverage=48h (>26),
-    # so the website showed Friday + Sunday instead of Friday + Saturday.
-    with TemporaryDirectory() as td:
-        previous = CACHE
-        CACHE = Path(td) / 'dup_intervals'
-        CACHE.mkdir()
-        run = datetime(2026, 11, 20, 6, tzinfo=timezone.utc)
-        for start_h, end_h, low, high in (
-            (6, 24, 5.0, 10.0),
-            (24, 48, 7.0, 15.0),
-            (6, 48, 12.0, 25.0),  # cumulative; MUST NOT be added twice
-        ):
-            record = {
-                'model': 'icon_d2', 'run_utc': run.isoformat(),
-                'start_utc': (run + timedelta(hours=start_h)).isoformat(),
-                'end_utc': (run + timedelta(hours=end_h)).isoformat(),
-                'file': f'icon_d2_{start_h}-{end_h}.png',
-                'statistics': {'dolomites': {'1500': {
-                    'q25': low, 'median': (low + high) / 2,
-                    'q75': high, 'pixels': 200}}},
-            }
-            (CACHE / f'icon_d2_{start_h}-{end_h}.json').write_text(json.dumps(record))
-        fri = model_daily_stats(
-            [json.loads(p.read_text()) for p in CACHE.glob('*.json')],
-            datetime(2026, 11, 20).date(), 'dolomites', 1500)
-        sat = model_daily_stats(
-            [json.loads(p.read_text()) for p in CACHE.glob('*.json')],
-            datetime(2026, 11, 21).date(), 'dolomites', 1500)
-        sun = model_daily_stats(
-            [json.loads(p.read_text()) for p in CACHE.glob('*.json')],
-            datetime(2026, 11, 22).date(), 'dolomites', 1500)
-        assert fri is not None and sat is not None and sun is not None
-        assert sat['coverage_hours'] == 24.0, sat
-        check = build_summary(datetime(2026, 11, 20, 12, tzinfo=timezone.utc))
-        dates_displayed = [check['dates'][i] for i in check['available_day_indices']['icon_d2']]
-        assert dates_displayed == ['2026-11-20', '2026-11-21'], dates_displayed
-        assert check['data']['icon_d2']['dolomites']['1500'][1]['available']
-        print('Alpen-tabellen: 0-48h cumulatief dubbel tellen voorkomen; '
-              'vrijdag + zaterdag OK (24 u zaterdag)')
-        CACHE = previous
+        assert page.count('class="as-total"') == 15
+        assert page.count('class="as-height-radio"') == 15
+        assert page.count('data-altitude="2500"') == 3
+        assert page.count('data-altitude="3000"') == 3
+        assert '#as-height-icon_d2-3000:checked ~ .as-height-view-icon_d2-3000' in page
+        assert 'zo 22/11' in page
+        assert 'P10–P90' in page
+        assert 'Hybrid Maps' in page and 'ICON-D2 Maps' in page
+        publish_site(summary, site)
+        assert (site / 'index.html').read_text().count('id="tab-tables"') == 1
+        assert (site / 'regional_snowfall.json').is_file()
+        CACHE = old_cache
+    print('Alpen-tabellen: 3/3/7 kalenderdagen, vijf hoogtekeuzes, vierde tab OK')
 
+    # Different models may each cover just part of Friday/Sunday. The total
+    # must cumulate EACH GRID CELL before taking spatial P10/P90, rather than
+    # summing two independent daily quantiles.
+    with TemporaryDirectory() as td:
+        old_cache = CACHE
+        CACHE = Path(td) / 'exact_total'
+        DEM_REGISTRY.clear()
+        lon = np.linspace(5., 16.8, 590)
+        lat = np.linspace(43.6, 49.0, 270)
+        dem = np.full((len(lat), len(lon)), 2000., dtype='float32')
+        assert register_dem(lon, lat, dem)
+        # Highly anticorrelated snowfall: both pixels receive 30 cm TOTAL.
+        first_field = np.broadcast_to(
+            np.where(lon[None, :] < 12.0, 5., 25.), dem.shape).astype('float32')
+        second_field = 30. - first_field
+        run = datetime(2026, 11, 20, 12, tzinfo=timezone.utc)
+        assert capture_numeric_field(first_field, lon, lat, 'alps', run, 0, 24, 'icon_d2')
+        assert capture_numeric_field(second_field, lon, lat, 'alps', run, 24, 48, 'icon_d2')
+        check = build_summary(datetime(2026, 11, 20, 16, tzinfo=timezone.utc))
+        observed = [check['dates'][i] for i in check['available_day_indices']['icon_d2']]
+        assert observed == ['2026-11-20','2026-11-21','2026-11-22'], observed
+        total = check['totals']['icon_d2']['dolomites']['2000']
+        assert total['method'] == 'p10_p90_of_pixelwise_cumulative_snow', total
+        assert (total['low_cm'], total['high_cm']) == (30.0, 30.0), total
+        assert total['coverage_hours'] == 48.0, total
+        assert total['partial'] is True
+        CACHE = old_cache
+        DEM_REGISTRY.clear()
+    print('Alpen-tabellen: echte cumulatieve raster-P10-P90 en zondag getest')
     print('Alpen-tabellen self-test OK')
 
 
