@@ -4,7 +4,7 @@ The optional matplotlib capture hook records numerical snowfall fields *during*
 existing map rendering. This avoids OCR / inferring values from map colours and
 avoids downloading GRIB files a second time. Post-processing builds a standalone
 JSON data file plus interactive height selection (1000-3000 m) and model-specific
-P10-P90 ranges. Period totals use summed grid pixels where available.
+P25-P75 ranges. Period totals use summed grid pixels where available.
 
 Model fields and elevations must be aligned. If this cannot be demonstrated,
 we publish missing data, never guessed numerical snowfall.
@@ -46,7 +46,12 @@ REGIONS = (
     ("s_fr", "Zuid-Franse Alpen", ((5.55,43.58),(6.50,43.60),(7.43,44.02),(7.32,45.35),(6.55,45.40),(5.50,44.65))),
     ("valais", "Wallis / Valais", ((6.75,45.86),(7.80,45.82),(8.55,46.23),(8.34,46.71),(7.14,46.59),(6.60,46.20))),
     ("bern", "Berner Oberland", ((7.00,46.35),(8.37,46.35),(8.55,46.85),(7.92,47.04),(7.12,46.96))),
-    ("central_ch", "Centraal-Zwitserland", ((8.02,46.50),(9.12,46.46),(9.30,47.18),(8.63,47.30),(8.07,47.02))),
+    # Central Swiss Alps NORTH of the main Alpine watershed: Uri, Engelberg/Titlis,
+    # Schwyz and Glarus. Southern exposure of the Gotthard side is handled by Ticino.
+    ("central_ch", "Centraal-Zwitserland (noordflank)", ((8.02,46.58),(8.46,46.55),(8.82,46.59),(9.15,46.69),(9.30,47.18),(8.63,47.30),(8.07,47.02))),
+    # Southern Swiss Alps around upper Ticino, Leventina, Blenio, Verzasca and
+    # Maggia valleys. Approximate climatic polygon, NOT an exact canton boundary.
+    ("ticino", "Ticino / Tessin (zuidflank)", ((8.38,46.42),(8.51,46.54),(8.76,46.61),(9.02,46.55),(9.25,46.41),(9.36,46.24),(9.30,46.05),(9.14,45.82),(8.91,45.82),(8.76,45.95),(8.65,46.13),(8.45,46.25))),
     ("graubunden", "Graubünden", ((8.77,46.17),(10.56,46.11),(10.70,46.87),(9.88,47.20),(8.91,47.10))),
     ("aosta", "Aostadal / Piemonte", ((6.65,44.71),(7.85,44.73),(8.43,45.55),(8.06,46.09),(7.00,46.01))),
     ("lombardy", "Lombardische Alpen", ((8.36,45.78),(9.25,45.76),(10.69,46.08),(10.45,46.60),(9.29,46.69),(8.49,46.27))),
@@ -58,6 +63,7 @@ REGIONS = (
     ("dolomites", "Dolomieten", ((11.15,46.23),(12.64,46.23),(12.79,46.68),(12.12,46.96),(11.22,46.83))),
     ("julian", "Julische Alpen", ((13.28,46.10),(14.36,46.12),(14.30,46.72),(13.37,46.75))),
 )
+REGION_POLYGONS = {region_id: polygon for region_id, _name, polygon in REGIONS}
 MODEL_LABELS = {"hybrid": "Hybrid", "icon_d2": "ICON-D2", "ecmwf": "ECMWF"}
 MODEL_MAX_DISPLAY_DAYS = {"hybrid": 3, "icon_d2": 3, "ecmwf": 7}
 NAME_PATTERN = re.compile(
@@ -80,6 +86,19 @@ def point_inside_polygon(x: np.ndarray, y: np.ndarray, poly: tuple) -> np.ndarra
             inside ^= cross
         x0, y0 = x1, y1
     return inside
+
+
+def region_pixel_mask(x, y, region_id, polygon):
+    """Return the mountain-region mask, giving Ticino exclusive priority.
+
+    The existing polygons are approximate weather regions, and several formerly
+    overlapped the southern Swiss Alps. Remove Ticino pixels from every other
+    region so Ticino vs. Central Switzerland is a meaningful north/south split.
+    """
+    result = point_inside_polygon(x, y, polygon)
+    if region_id != "ticino":
+        result &= ~point_inside_polygon(x, y, REGION_POLYGONS["ticino"])
+    return result
 
 
 def _coordinates(x, y, shape):
@@ -251,7 +270,7 @@ def capture_figure(fig, output):
             continue
         index = np.where(coarse)
         ri, ci = index[0], index[1]
-        submask = point_inside_polygon(xx[ri, ci], yy[ri, ci], polygon)
+        submask = region_pixel_mask(xx[ri, ci], yy[ri, ci], region_id, polygon)
         region_values = {}
         for alt in ALTITUDES:
             mask = (submask & np.isfinite(dem[ri, ci]) &
@@ -260,11 +279,11 @@ def capture_figure(fig, output):
             if int(np.count_nonzero(mask)) < MIN_PIXELS:
                 continue
             selected_values = values[ri[mask], ci[mask]]
-            q10, q50, q90 = np.percentile(selected_values, (10, 50, 90))
+            q25, q50, q75 = np.percentile(selected_values, (25, 50, 75))
             region_values[str(alt)] = {
-                "q10": round(float(q10), 2),
+                "q25": round(float(q25), 2),
                 "median": round(float(q50), 2),
-                "q90": round(float(q90), 2),
+                "q75": round(float(q75), 2),
                 "pixels": int(selected_values.size),
             }
             flat_index = np.ravel_multi_index((ri[mask], ci[mask]), values.shape)
@@ -279,7 +298,7 @@ def capture_figure(fig, output):
     if end <= start:
         return False
     # Save aligned per-pixel values, not merely daily percentiles. We can then
-    # calculate spatial P10/P90 AFTER cumulating the forecast on every pixel.
+    # calculate spatial P25/P75 AFTER cumulating the forecast on every pixel.
     # These NPZ sidecars are ephemeral runner files, never copied to Pages.
     pixel_file = None
     grid_id = None
@@ -558,7 +577,7 @@ def model_daily_stats(records, date, region_id, altitude):
             right = min(end, day_end)
             if right <= left:
                 continue
-            low, high = float(stats['q10']), float(stats['q90'])
+            low, high = float(stats['q25']), float(stats['q75'])
             if not all(map(math.isfinite, (low, high))):
                 continue
         except (TypeError, ValueError, KeyError, AttributeError):
@@ -592,7 +611,7 @@ def model_daily_stats(records, date, region_id, altitude):
     expected_day_hours = (day_end - day_start).total_seconds() / 3600.0
     if coverage < 3.0 or coverage > expected_day_hours + 0.01:
         return None
-    return {'q10': lo, 'q90': hi,
+    return {'q25': lo, 'q75': hi,
             'coverage_hours': round(coverage, 1), 'files': sorted(used)}
 
 
@@ -626,7 +645,7 @@ def _pixel_vectors(path: str, key: str):
 
 
 def _actual_cumulative_range(records, dates, indices, region_id, altitude, partial):
-    """P10/P90 of each pixel's accumulated snowfall in the displayed period.
+    """P25/P75 of each pixel's accumulated snowfall in the displayed period.
 
     We take the shortest unique source covering each time interval, in case
     a cumulative plot slipped into the snapshots alongside daily maps. Each
@@ -698,7 +717,7 @@ def _actual_cumulative_range(records, dates, indices, region_id, altitude, parti
     good = pixel_coverage >= temporal_coverage - 1.0
     if np.count_nonzero(good) < MIN_PIXELS:
         return None
-    low, high = np.percentile(total_cm[good], (10, 90))
+    low, high = np.percentile(total_cm[good], (25, 75))
     return {
         'available': True,
         'range_cm': _range_text(float(low), float(high)),
@@ -707,7 +726,7 @@ def _actual_cumulative_range(records, dates, indices, region_id, altitude, parti
         'coverage_hours': round(temporal_coverage/3600, 1),
         'partial': bool(partial),
         'day_count': len(indices),
-        'method': 'p10_p90_of_pixelwise_cumulative_snow',
+        'method': 'p25_p75_of_pixelwise_cumulative_snow',
         'pixels': int(np.count_nonzero(good)),
     }
 
@@ -717,7 +736,7 @@ def _sum_visible_day_ranges(cells, indices):
 
     Source snapshots currently contain regional daily quantiles, not the full
     per-pixel cumulative field in older snapshots. Summing lower/upper daily quantiles therefore
-    gives an *indicative* period range, not the spatial q10/q90 of accumulated
+    gives an *indicative* period range, not the spatial q25/q75 of accumulated
     snow. Missing days must not silently be treated as zero snowfall.
     """
     unavailable = {"available": False, "range_cm": "–"}
@@ -751,7 +770,7 @@ def _sum_visible_day_ranges(cells, indices):
         "coverage_hours": round(sum(float(c.get("coverage_hours", 0)) for c in daily), 1),
         "partial": partial,
         "day_count": len(daily),
-        "method": "indicative_sum_of_daily_regional_q10_q90",
+        "method": "indicative_sum_of_daily_regional_q25_q75",
     }
 
 
@@ -791,11 +810,11 @@ def build_summary(now_utc: datetime | None = None):
         "models_found": {m: len(v) for m, v in by_model.items()},
         "method": (
             "Afzonderlijke modellen (Hybrid, ICON-D2 en ECMWF); geen menging. "
-            "Ruimtelijke 10e–90e percentielen binnen +/-100 m van de aangegeven hoogte. "
+            "Ruimtelijke 25e–75e percentielen binnen +/-100 m van de aangegeven hoogte. "
             "Overlappende dag- en cumulatieve kaartintervallen worden niet dubbel geteld. "
             "Dagtotalen zijn benaderingen indien modelkaart-intervallen niet met kalenderdagen "
             "samenvallen. Gedeeltelijke dagen zijn als zodanig aangeduid; geen volledige 24u-som. "
-            "De totaalkolom is P10–P90 van per-pixel gecumuleerde sneeuwval over "
+            "De totaalkolom is P25–P75 van per-pixel gecumuleerde sneeuwval over "
             "de getoonde modelperiode (indien rasterbijlagen beschikbaar zijn), "
             "anders een duidelijk gemarkeerde indicatieve som van dagpercentielen. "
             "Ontbrekende dagcellen geven geen volledig cumulatief totaal. "
@@ -819,9 +838,9 @@ def build_summary(now_utc: datetime | None = None):
                         continue
                     day_available.add(i)
                     cells.append({
-                        "range_cm": _range_text(val["q10"], val["q90"]),
-                        "low_cm": round(float(val["q10"]), 1),
-                        "high_cm": round(float(val["q90"]), 1),
+                        "range_cm": _range_text(val["q25"], val["q75"]),
+                        "low_cm": round(float(val["q25"]), 1),
+                        "high_cm": round(float(val["q75"]), 1),
                         "coverage_hours": val["coverage_hours"],
                         "partial": val["coverage_hours"] < 23.5,
                         "available": True,
@@ -1036,10 +1055,10 @@ def render_table_section(summary):
                                    'as-medium' if isinstance(total_high, (int, float)) and total_high >= 10 else
                                    'as-light')
                     total_partial = total_ok and bool(period.get('partial'))
-                    total_exact = period.get('method') == 'p10_p90_of_pixelwise_cumulative_snow'
+                    total_exact = period.get('method') == 'p25_p75_of_pixelwise_cumulative_snow'
                     total_title = (
-                        ('P10-P90 van per-pixel gecumuleerde sneeuwval' if total_exact else
-                         'Indicatieve som van dagelijkse P10-P90 ranges')
+                        ('P25-P75 van per-pixel gecumuleerde sneeuwval' if total_exact else
+                         'Indicatieve som van dagelijkse P25-P75 ranges')
                         + (f" · {period['coverage_hours']} uur" if period.get('coverage_hours') is not None else '')
                         + (' · bevat gedeeltelijke dag' if total_partial else '')
                     ) if total_ok else 'Geen volledig totaal: minstens een dag heeft onvoldoende gegevens'
@@ -1087,15 +1106,15 @@ def render_table_section(summary):
         'Ranges gebruiken echte numerieke modelvelden.</p>'
         '<div class="as-switcher" role="group" aria-label="Kies een weermodel">'
         + ''.join(choices) + ''.join(views) + '</div>'
-        '<p class="as-foot">Ranges: P10–P90 (10e–90e percentiel) van de sneeuwval '
+        '<p class="as-foot">Ranges: P25–P75 (25e–75e percentiel) van de sneeuwval '
         'binnen de regio op de gekozen hoogte (±100 m). '
-        '<strong>Totaal</strong>: P10–P90 na cumulatie per rastercel over de getoonde '
+        '<strong>Totaal</strong>: P25–P75 na cumulatie per rastercel over de getoonde '
         'voorspellingsperiode; een † betekent dat alleen een indicatieve som '
         'van dagranges beschikbaar was. '
         'Een * duidt een gedeeltelijke kalenderdag aan; '
         '– betekent onvoldoende gegevens, niet 0 cm. '
         'De dagwaarden zijn bij kaartintervallen rond middernacht naar tijdsduur verdeeld. '
-        'Regiogrenzen zijn indicatief.</p>'
+        'Regiogrenzen zijn indicatief; Ticino valt niet opnieuw onder Centraal-Zwitserland of de Lombardische Alpen.</p>'
         '</div></section>'
     )
 
@@ -1254,6 +1273,17 @@ def self_test():
     global CACHE
     assert point_inside_polygon(np.array([7.5]), np.array([46.2]), REGIONS[2][2])[0]
     assert not point_inside_polygon(np.array([13.5]), np.array([46.2]), REGIONS[2][2])[0]
+    # Realistic Swiss north/south grouping, with Ticino excluded from overlaps.
+    ticino = REGION_POLYGONS["ticino"]
+    central = REGION_POLYGONS["central_ch"]
+    assert point_inside_polygon(np.array([8.95]), np.array([46.19]), ticino)[0]  # Bellinzona
+    assert point_inside_polygon(np.array([8.60]), np.array([46.53]), ticino)[0]  # Airolo
+    assert point_inside_polygon(np.array([8.42]), np.array([46.82]), central)[0]  # Engelberg
+    assert region_pixel_mask(np.array([8.95]), np.array([46.19]), "ticino", ticino)[0]
+    assert not region_pixel_mask(np.array([8.95]), np.array([46.19]), "lombardy", REGION_POLYGONS["lombardy"])[0]
+    assert not region_pixel_mask(np.array([8.60]), np.array([46.53]), "central_ch", central)[0]
+    assert np.percentile(np.arange(101), (25,75)).tolist() == [25., 75.]
+
     assert ALTITUDES == (1000, 1500, 2000, 2500, 3000)
     assert _range_text(11, 19) == '10–20'
     assert _range_text(0, 0.5) == '0'
@@ -1274,14 +1304,14 @@ def self_test():
         files = list(CACHE.glob('*.json'))
         assert len(files) == 1
         record = json.loads(files[0].read_text())
-        assert record['statistics']['dolomites']['3000']['q10'] == 15.0
-        assert record['statistics']['dolomites']['3000']['q90'] == 15.0
+        assert record['statistics']['dolomites']['3000']['q25'] == 15.0
+        assert record['statistics']['dolomites']['3000']['q75'] == 15.0
         assert (CACHE / record['pixel_file']).exists()
         vectors = _pixel_vectors(str(CACHE / record['pixel_file']), 'dolomites_3000')
         assert vectors is not None and len(vectors[0]) >= MIN_PIXELS
         CACHE = old_cache
         DEM_REGISTRY.clear()
-    print('Alpen-tabellen: vijf hoogtes, P10-P90 en rasterbijlagen OK')
+    print('Alpen-tabellen: vijf hoogtes, P25-P75 en Ticino-rasterbijlagen OK')
 
     # Per-model horizons: 48h can touch 3 different dates.
     with TemporaryDirectory() as td:
@@ -1301,7 +1331,7 @@ def self_test():
                        'start_utc': a.isoformat(), 'end_utc': b.isoformat(),
                        'file': f'{model}_{n}.png',
                        'statistics': {'dolomites': {str(alt): {
-                           'q10': low, 'median': low+5., 'q90': low+10.,
+                           'q25': low, 'median': low+5., 'q75': low+10.,
                            'pixels': 200} for alt in ALTITUDES}}}
                 (CACHE / f'{model}_{n}.json').write_text(json.dumps(row))
         summary = build_summary(datetime(2026, 11, 20, 17, tzinfo=timezone.utc))
@@ -1349,7 +1379,7 @@ function selectModel(model) {
         assert page.count('data-altitude="3000"') == 3
         assert '#as-height-icon_d2-3000:checked ~ .as-height-view-icon_d2-3000' in page
         assert 'zo 22/11' in page
-        assert 'P10–P90' in page
+        assert 'P25–P75' in page
         assert 'Hybrid Maps' in page and 'ICON-D2 Maps' in page
         publish_site(summary, site)
         assert (site / 'index.html').read_text().count('id="tab-tables"') == 1
@@ -1358,7 +1388,7 @@ function selectModel(model) {
     print('Alpen-tabellen: 3/3/7 kalenderdagen, vijf hoogtekeuzes, vierde tab OK')
 
     # Different models may each cover just part of Friday/Sunday. The total
-    # must cumulate EACH GRID CELL before taking spatial P10/P90, rather than
+    # must cumulate EACH GRID CELL before taking spatial P25/P75, rather than
     # summing two independent daily quantiles.
     with TemporaryDirectory() as td:
         old_cache = CACHE
@@ -1379,13 +1409,13 @@ function selectModel(model) {
         observed = [check['dates'][i] for i in check['available_day_indices']['icon_d2']]
         assert observed == ['2026-11-20','2026-11-21','2026-11-22'], observed
         total = check['totals']['icon_d2']['dolomites']['2000']
-        assert total['method'] == 'p10_p90_of_pixelwise_cumulative_snow', total
+        assert total['method'] == 'p25_p75_of_pixelwise_cumulative_snow', total
         assert (total['low_cm'], total['high_cm']) == (30.0, 30.0), total
         assert total['coverage_hours'] == 48.0, total
         assert total['partial'] is True
         CACHE = old_cache
         DEM_REGISTRY.clear()
-    print('Alpen-tabellen: echte cumulatieve raster-P10-P90 en zondag getest')
+    print('Alpen-tabellen: echte cumulatieve raster-P25-P75 en zondag getest')
     print('Alpen-tabellen self-test OK')
 
 
